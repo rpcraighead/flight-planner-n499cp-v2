@@ -1,0 +1,24 @@
+# Database
+*.db
+
+# Cached charts
+charts/
+
+# SSH keys (should never be committed)
+*.pub
+*id_rsa*
+C:Usersrpcra*
+
+# Archives
+*.tar.gz
+
+# Claude settings
+.claude/
+
+# Malformed directory
+{static/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

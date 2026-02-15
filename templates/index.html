@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>N499CP Flight Planner - CAP San Diego Sr. Sq. 57</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <!-- Loading/Splash Screen -->
+    <div id="loading-screen" class="loading-screen">
+        <div class="loading-content">
+            <img src="{{ url_for('static', filename='logo.jpg') }}" alt="CAP Sq 57" class="loading-logo">
+            <h1 class="loading-title">N499CP Flight Planner</h1>
+            <p class="loading-subtitle">CAP San Diego Senior Squadron 57</p>
+            
+            <div class="loading-status">
+                <div class="loading-spinner"></div>
+                <p id="loading-message">Initializing...</p>
+            </div>
+            
+            <div class="loading-progress">
+                <div class="loading-progress-bar">
+                    <div id="loading-progress-fill" class="loading-progress-fill"></div>
+                </div>
+                <p id="loading-detail">Please stand by, downloading California VFR and IFR charts...</p>
+            </div>
+            
+            <div class="loading-info">
+                <p>VFR Tiles: <span id="loading-vfr">0</span> | IFR Tiles: <span id="loading-ifr">0</span></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App (hidden until loaded) -->
+    <div id="main-app" class="app-container" style="display: none;">
+        <header class="app-header">
+            <div class="header-content">
+                <div class="logo-section">
+                    <img src="{{ url_for('static', filename='logo.jpg') }}" alt="CAP Sq 57" class="logo-img">
+                    <div>
+                        <h1 class="app-title">N499CP</h1>
+                        <p class="app-subtitle">CAP SAN DIEGO SR. SQ. 57 • CESSNA 172S NAV III</p>
+                    </div>
+                </div>
+                <div class="db-status">
+                    <span id="db-indicator" class="db-indicator"></span>
+                    <span id="db-count">Loading...</span>
+                    <button id="update-db-btn" class="btn-update">Update Database</button>
+                </div>
+            </div>
+        </header>
+
+        <nav class="tab-navigation">
+            <button class="tab-button active" data-tab="route">Route</button>
+            <button class="tab-button" data-tab="vfr-chart">VFR Chart</button>
+            <button class="tab-button" data-tab="ifr-chart">IFR Chart</button>
+            <button class="tab-button" data-tab="briefing">Briefing</button>
+            <button class="tab-button" data-tab="performance">Performance</button>
+            <button class="tab-button" data-tab="weight">W&B</button>
+            <button class="tab-button" data-tab="reference">Reference</button>
+        </nav>
+
+        <div id="update-modal" class="modal" style="display: none;">
+            <div class="modal-content">
+                <h3>Updating Aviation Database</h3>
+                <div class="progress-bar"><div id="progress-fill" class="progress-fill"></div></div>
+                <p id="update-message">Initializing...</p>
+            </div>
+        </div>
+
+        <main class="tab-content">
+            <!-- Route Tab -->
+            <div id="route-tab" class="tab-panel active">
+                <div class="panel-grid">
+                    <div class="input-card">
+                        <label>Departure</label>
+                        <input type="text" id="departure" placeholder="KSEE" maxlength="4" class="airport-input">
+                        <div id="dep-info" class="airport-info"></div>
+                    </div>
+                    <div class="input-card">
+                        <label>Destination</label>
+                        <input type="text" id="destination" placeholder="KMYF" maxlength="4" class="airport-input">
+                        <div id="dest-info" class="airport-info"></div>
+                    </div>
+                </div>
+
+                <div class="waypoints-section">
+                    <div class="section-header">
+                        <h3>Waypoints</h3>
+                        <button id="add-waypoint" class="btn-secondary">+ Add Waypoint</button>
+                    </div>
+                    <div id="waypoints-container"></div>
+                    <p class="hint">Enter airport codes (KXXX) or navaid IDs (VOR/NDB)</p>
+                </div>
+
+                <div class="panel-grid">
+                    <div class="input-card">
+                        <label>Cruise Altitude (ft)</label>
+                        <input type="number" id="cruise-altitude" value="6000" step="500">
+                    </div>
+                    <div class="input-card">
+                        <label>Engine RPM</label>
+                        <select id="cruise-rpm">
+                            <option value="2600">2600 RPM</option>
+                            <option value="2500">2500 RPM</option>
+                            <option value="2400" selected>2400 RPM (Economy)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="button-row">
+                    <button id="calculate-route" class="btn-primary">Calculate Flight Plan</button>
+                </div>
+
+                <div id="route-results" class="results-section" style="display: none;">
+                    <h3>Flight Plan: <span id="route-string"></span></h3>
+                    
+                    <div class="summary-grid">
+                        <div class="summary-card">
+                            <div class="summary-value" id="total-distance">--</div>
+                            <div class="summary-label">Distance (NM)</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-value" id="total-time">--</div>
+                            <div class="summary-label">Time (min)</div>
+                        </div>
+                        <div class="summary-card">
+                            <div class="summary-value" id="total-fuel">--</div>
+                            <div class="summary-label">Total Fuel (gal)</div>
+                        </div>
+                    </div>
+
+                    <div class="winds-info">
+                        <h4>Winds at Altitude</h4>
+                        <span id="winds-data">--</span>
+                    </div>
+
+                    <h4>Route Segments</h4>
+                    <div class="table-container">
+                        <table class="route-table">
+                            <thead>
+                                <tr><th>From</th><th>To</th><th>Dist</th><th>TC</th><th>WCA</th><th>MH</th><th>GS</th><th>Time</th><th>Fuel</th></tr>
+                            </thead>
+                            <tbody id="route-segments"></tbody>
+                        </table>
+                    </div>
+
+                    <h4>Fuel Summary</h4>
+                    <table class="fuel-table">
+                        <tr><td>Taxi & Takeoff</td><td id="fuel-taxi">--</td></tr>
+                        <tr><td>Climb to Cruise</td><td id="fuel-climb">--</td></tr>
+                        <tr><td>Cruise</td><td id="fuel-cruise">--</td></tr>
+                        <tr><td>45-min Reserve</td><td id="fuel-reserve">--</td></tr>
+                        <tr class="total"><td><strong>Total Required</strong></td><td id="fuel-total-req"><strong>--</strong></td></tr>
+                    </table>
+                </div>
+            </div>
+
+            <!-- VFR Chart Tab -->
+            <div id="vfr-chart-tab" class="tab-panel">
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3>VFR Sectional Chart</h3>
+                        <div class="chart-legend">
+                            <span class="legend-item"><span class="legend-line route-line"></span> Route</span>
+                            <span class="legend-item"><span class="legend-dot dep-dot"></span> Departure</span>
+                            <span class="legend-item"><span class="legend-dot dest-dot"></span> Destination</span>
+                            <span class="legend-item"><span class="legend-dot wpt-dot"></span> Waypoint</span>
+                        </div>
+                    </div>
+                    <div id="vfr-map" class="map-container"></div>
+                </div>
+            </div>
+
+            <!-- IFR Chart Tab -->
+            <div id="ifr-chart-tab" class="tab-panel">
+                <div class="chart-container">
+                    <div class="chart-header">
+                        <h3>IFR Low Enroute Chart</h3>
+                        <div class="chart-legend">
+                            <span class="legend-item"><span class="legend-line route-line-ifr"></span> Route</span>
+                            <span class="legend-item"><span class="legend-dot dep-dot"></span> Departure</span>
+                            <span class="legend-item"><span class="legend-dot dest-dot"></span> Destination</span>
+                            <span class="legend-item"><span class="legend-dot wpt-dot"></span> Waypoint</span>
+                        </div>
+                    </div>
+                    <div id="ifr-map" class="map-container"></div>
+                </div>
+            </div>
+
+            <!-- Briefing Tab -->
+            <div id="briefing-tab" class="tab-panel">
+                <div id="no-briefing" class="placeholder">
+                    <p>Weather briefing will be automatically generated when you calculate a flight plan.</p>
+                </div>
+                
+                <div id="briefing-content" style="display: none;">
+                    <div class="briefing-header">
+                        <h3>Weather Briefing</h3>
+                        <div class="briefing-meta">
+                            <span id="briefing-time">--</span>
+                            <span id="briefing-route">--</span>
+                        </div>
+                    </div>
+
+                    <div class="briefing-section"><h4>📡 METARs</h4><div id="metars-content"></div></div>
+                    <div class="briefing-section"><h4>📅 TAFs</h4><div id="tafs-content"></div></div>
+                    <div class="briefing-section"><h4>💨 Winds Aloft</h4><div id="winds-content"></div></div>
+                    <div class="briefing-section"><h4>👨‍✈️ PIREPs</h4><div id="pireps-content"></div></div>
+                    <div class="briefing-section"><h4>⚠️ AIRMETs/SIGMETs</h4><div id="sigmets-content"></div></div>
+                    <div class="briefing-section"><h4>🚫 TFRs</h4><div id="tfrs-content"></div></div>
+                    <div class="briefing-section"><h4>📋 NOTAMs</h4><div id="notams-content"></div></div>
+                </div>
+            </div>
+
+            <!-- Performance Tab -->
+            <div id="performance-tab" class="tab-panel">
+                <div class="perf-section">
+                    <h3>Takeoff Performance</h3>
+                    <div class="panel-grid">
+                        <div class="input-card"><label>Weight (lbs)</label><input type="number" id="to-weight" value="2550" max="2550"></div>
+                        <div class="input-card"><label>Pressure Alt (ft)</label><input type="number" id="to-altitude" value="0" step="500"></div>
+                        <div class="input-card"><label>Temp (°C)</label><input type="number" id="to-temp" value="15"></div>
+                        <div class="input-card"><label>Headwind (kts)</label><input type="number" id="to-wind" value="0"></div>
+                    </div>
+                    <button id="calc-takeoff" class="btn-primary">Calculate Takeoff</button>
+                    <div id="takeoff-results" class="perf-results" style="display: none;">
+                        <div class="result-row"><span>Ground Roll:</span><span class="value" id="to-ground-roll">--</span> ft</div>
+                        <div class="result-row"><span>Over 50' Obstacle:</span><span class="value" id="to-total">--</span> ft</div>
+                    </div>
+                </div>
+
+                <div class="perf-section">
+                    <h3>Landing Performance</h3>
+                    <div class="panel-grid">
+                        <div class="input-card"><label>Pressure Alt (ft)</label><input type="number" id="land-altitude" value="0" step="500"></div>
+                        <div class="input-card"><label>Temp (°C)</label><input type="number" id="land-temp" value="15"></div>
+                        <div class="input-card"><label>Headwind (kts)</label><input type="number" id="land-wind" value="0"></div>
+                    </div>
+                    <button id="calc-landing" class="btn-primary">Calculate Landing</button>
+                    <div id="landing-results" class="perf-results" style="display: none;">
+                        <div class="result-row"><span>Ground Roll:</span><span class="value" id="land-ground-roll">--</span> ft</div>
+                        <div class="result-row"><span>Over 50' Obstacle:</span><span class="value" id="land-total">--</span> ft</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- W&B Tab -->
+            <div id="weight-tab" class="tab-panel">
+                <h3>Weight & Balance - N499CP</h3>
+                <p class="note">Update empty weight with your aircraft's actual data from W&B records.</p>
+                
+                <div class="wb-grid">
+                    <div class="input-card"><label>Empty Weight (lbs)</label><input type="number" id="wb-empty-weight" value="1642"></div>
+                    <div class="input-card"><label>Empty Moment (/1000)</label><input type="number" id="wb-empty-moment" value="62.6" step="0.1"></div>
+                    <div class="input-card"><label>Pilot (lbs)</label><input type="number" id="wb-pilot" value="180"></div>
+                    <div class="input-card"><label>Front Passenger (lbs)</label><input type="number" id="wb-front-pax" value="0"></div>
+                    <div class="input-card"><label>Rear Passengers (lbs)</label><input type="number" id="wb-rear-pax" value="0"></div>
+                    <div class="input-card"><label>Baggage (lbs)</label><input type="number" id="wb-baggage" value="0" max="120"></div>
+                    <div class="input-card"><label>Fuel (gal)</label><input type="number" id="wb-fuel" value="53" max="53" step="0.1"></div>
+                </div>
+
+                <button id="calc-wb" class="btn-primary">Calculate W&B</button>
+
+                <div id="wb-results" class="results-section" style="display: none;">
+                    <div class="wb-summary">
+                        <div class="wb-card"><div class="wb-value" id="wb-total-weight">--</div><div class="wb-label">Total Weight</div><div class="wb-limit">Max: 2550 lbs</div></div>
+                        <div class="wb-card"><div class="wb-value" id="wb-cg">--</div><div class="wb-label">CG (in aft)</div><div class="wb-limit">35.0 - 47.3</div></div>
+                        <div class="wb-card"><div class="wb-value" id="wb-moment">--</div><div class="wb-label">Moment/1000</div></div>
+                    </div>
+                    <div id="wb-status" class="status-message"></div>
+                </div>
+            </div>
+
+            <!-- Reference Tab -->
+            <div id="reference-tab" class="tab-panel">
+                <h3>N499CP Quick Reference</h3>
+                <div class="ref-grid">
+                    <div class="ref-card">
+                        <h4>V-Speeds (KIAS)</h4>
+                        <table>
+                            <tr><td>Vx</td><td>62</td></tr>
+                            <tr><td>Vy</td><td>74</td></tr>
+                            <tr><td>Va (2550)</td><td>99</td></tr>
+                            <tr><td>Vfe 10°</td><td>110</td></tr>
+                            <tr><td>Vfe Full</td><td>85</td></tr>
+                            <tr><td>Vno</td><td>129</td></tr>
+                            <tr><td>Vne</td><td>163</td></tr>
+                            <tr><td>Vso</td><td>40</td></tr>
+                            <tr><td>Vs1</td><td>48</td></tr>
+                            <tr><td>Best Glide</td><td>68</td></tr>
+                        </table>
+                    </div>
+                    <div class="ref-card">
+                        <h4>Weights</h4>
+                        <table>
+                            <tr><td>Max Ramp</td><td>2558 lbs</td></tr>
+                            <tr><td>Max T/O</td><td>2550 lbs</td></tr>
+                            <tr><td>Max Landing</td><td>2550 lbs</td></tr>
+                            <tr><td>Baggage A</td><td>120 lbs</td></tr>
+                            <tr><td>Baggage B</td><td>50 lbs</td></tr>
+                        </table>
+                    </div>
+                    <div class="ref-card">
+                        <h4>Fuel</h4>
+                        <table>
+                            <tr><td>Total</td><td>56 gal</td></tr>
+                            <tr><td>Usable</td><td>53 gal</td></tr>
+                            <tr><td>Weight</td><td>6.0 lbs/gal</td></tr>
+                            <tr><td>Arm</td><td>FS 48.0</td></tr>
+                        </table>
+                    </div>
+                    <div class="ref-card">
+                        <h4>CG Limits</h4>
+                        <table>
+                            <tr><td>Forward</td><td>35.0 in</td></tr>
+                            <tr><td>Aft</td><td>47.3 in</td></tr>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
