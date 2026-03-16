@@ -1,0 +1,13 @@
+__pycache__
+*.pyc
+.git
+.claude
+charts
+aviation_data.db
+*.tar.gz
+*.pub
+.dockerignore
+Dockerfile
+C:Usersrpcra*
+{static
+flight-tools-update.tar.gz

@@ -18,7 +18,7 @@ AVIATION_WEATHER_BASE = 'https://aviationweather.gov/api/data'
 # FAA official tile sources via ArcGIS
 TILE_SOURCES = {
     'vfr': 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
-    'ifr_low': 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_Low/MapServer/tile/{z}/{y}/{x}',
+    'ifr_low': 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_AreaLow/MapServer/tile/{z}/{y}/{x}',
     'ifr_high': 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_High/MapServer/tile/{z}/{y}/{x}',
 }
 
@@ -647,6 +647,271 @@ def wb():
         'within_cg_limits': ac['cg_forward_limit'] <= cg <= ac['cg_aft_limit'],
         'within_all_limits': tw <= ac['max_takeoff_weight'] and ac['cg_forward_limit'] <= cg <= ac['cg_aft_limit'],
         'moment_1000': round(tm/1000,1)
+    })
+
+# d-TPP airport diagram cache
+dtpp_cache = {'cycle': None, 'diagrams': {}, 'loading': False}
+
+def get_dtpp_cycle():
+    """Compute current FAA d-TPP cycle string (YYMM format)."""
+    from datetime import date
+    today = date.today()
+    # Try current and recent cycle codes
+    # Cycles are YYMM where MM is the month-ish (not exact, but close enough)
+    return f'{today.year % 100:02d}{today.month:02d}'
+
+def load_dtpp_diagrams():
+    """Download and parse the FAA d-TPP metafile to build airport diagram index."""
+    import xml.etree.ElementTree as ET
+
+    if dtpp_cache['loading']:
+        return
+    dtpp_cache['loading'] = True
+
+    cycle = get_dtpp_cycle()
+    log_msg(f"Downloading FAA d-TPP metafile for cycle {cycle}...")
+
+    try:
+        url = f'https://aeronav.faa.gov/d-tpp/{cycle}/xml_data/d-tpp_Metafile.xml'
+        r = requests.get(url, timeout=60, headers={'User-Agent': 'N499CP-Planner/1.0'})
+        if r.status_code != 200:
+            log_msg(f"d-TPP metafile not found for cycle {cycle}")
+            dtpp_cache['loading'] = False
+            return
+
+        root = ET.fromstring(r.content)
+        diagrams = {}
+
+        for apt in root.iter('airport_name'):
+            apt_ident = apt.get('apt_ident', '')
+            icao_ident = apt.get('icao_ident', '')
+            for rec in apt.iter('record'):
+                cn = rec.find('chart_name')
+                pdf = rec.find('pdf_name')
+                if cn is not None and pdf is not None and 'AIRPORT DIAGRAM' in (cn.text or ''):
+                    pdf_url = f'https://aeronav.faa.gov/d-tpp/{cycle}/{pdf.text}'
+                    if icao_ident:
+                        diagrams[icao_ident] = pdf_url
+                    if apt_ident:
+                        diagrams[apt_ident] = pdf_url
+
+        dtpp_cache['cycle'] = cycle
+        dtpp_cache['diagrams'] = diagrams
+        log_msg(f"Loaded {len(diagrams)} airport diagrams from d-TPP cycle {cycle}")
+    except Exception as e:
+        log_msg(f"Error loading d-TPP: {e}")
+    finally:
+        dtpp_cache['loading'] = False
+
+@app.route('/api/airport-detail/<icao>')
+def airport_detail(icao):
+    """Get detailed airport info including diagram URL."""
+    icao = icao.upper()
+    a = get_airport(icao)
+    if not a:
+        return jsonify({'success': False, 'error': f'Airport {icao} not found'})
+
+    runways = get_runways(icao)
+    faa_id = icao[1:] if icao.startswith('K') and len(icao) == 4 else icao
+
+    # Load d-TPP diagram index if not cached
+    if not dtpp_cache['diagrams'] and not dtpp_cache['loading']:
+        load_dtpp_diagrams()
+
+    # Look up diagram URL
+    diagram_url = dtpp_cache['diagrams'].get(icao) or dtpp_cache['diagrams'].get(faa_id)
+
+    # Fetch METAR for current conditions
+    metar = fetch_metar(icao)
+
+    return jsonify({
+        'success': True,
+        'airport': a,
+        'runways': runways,
+        'diagram_url': diagram_url,
+        'metar': metar,
+        'faa_id': faa_id
+    })
+
+@app.route('/api/terrain-profile', methods=['POST'])
+def terrain_profile():
+    """Sample terrain elevation along a route using USGS Elevation Point Query Service."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    d = request.json
+    route_points = d.get('route_points', [])
+    cruise_altitude = int(d.get('cruise_altitude', 6000))
+
+    if len(route_points) < 2:
+        return jsonify({'success': False, 'error': 'Need at least 2 route points'})
+
+    # Generate sample points along the route
+    samples = []
+    cumulative_dist = 0.0
+    MAX_SAMPLES = 80  # Cap to keep response time reasonable
+
+    # First pass: calculate total distance
+    total_route_dist = 0.0
+    for i in range(len(route_points) - 1):
+        p1, p2 = route_points[i], route_points[i + 1]
+        total_route_dist += gc_dist(p1['lat'], p1['lon'], p2['lat'], p2['lon'])
+
+    # Sample interval based on total distance
+    sample_interval = max(1.0, total_route_dist / MAX_SAMPLES)
+
+    for i in range(len(route_points) - 1):
+        p1 = route_points[i]
+        p2 = route_points[i + 1]
+        lat1, lon1 = p1['lat'], p1['lon']
+        lat2, lon2 = p2['lat'], p2['lon']
+        seg_dist = gc_dist(lat1, lon1, lat2, lon2)
+
+        n_samples = max(2, int(seg_dist / sample_interval))
+        for j in range(n_samples):
+            frac = j / max(1, n_samples - 1)
+            lat = lat1 + (lat2 - lat1) * frac
+            lon = lon1 + (lon2 - lon1) * frac
+            dist = cumulative_dist + seg_dist * frac
+
+            sample = {'lat': round(lat, 5), 'lon': round(lon, 5), 'dist_nm': round(dist, 1)}
+            if j == 0:
+                sample['waypoint'] = p1.get('identifier', '')
+            samples.append(sample)
+
+        cumulative_dist += seg_dist
+
+    # Add final point
+    last = route_points[-1]
+    samples.append({
+        'lat': round(last['lat'], 5),
+        'lon': round(last['lon'], 5),
+        'dist_nm': round(cumulative_dist, 1),
+        'waypoint': last.get('identifier', '')
+    })
+
+    # Deduplicate very close points
+    filtered = [samples[0]]
+    for s in samples[1:]:
+        if abs(s['dist_nm'] - filtered[-1]['dist_nm']) > 0.3 or s.get('waypoint'):
+            filtered.append(s)
+    if filtered[-1]['dist_nm'] != samples[-1]['dist_nm']:
+        filtered.append(samples[-1])
+    samples = filtered
+
+    # Query USGS elevation API in parallel
+    USGS_URL = 'https://epqs.nationalmap.gov/v1/json'
+
+    def fetch_elevation(idx, sample):
+        try:
+            r = requests.get(USGS_URL, params={
+                'x': sample['lon'], 'y': sample['lat'],
+                'units': 'Feet', 'wkid': 4326, 'includeDate': False
+            }, timeout=8)
+            if r.status_code == 200:
+                elev = float(r.json().get('value', 0))
+                return idx, max(0, elev) if elev > -1000 else 0
+        except:
+            pass
+        return idx, 0
+
+    # Fetch all elevations with 10 parallel workers
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = [pool.submit(fetch_elevation, i, s) for i, s in enumerate(samples)]
+        results = {}
+        for f in as_completed(futures):
+            idx, elev = f.result()
+            results[idx] = elev
+
+    max_elevation = 0
+    for i, sample in enumerate(samples):
+        sample['elevation_ft'] = round(results.get(i, 0))
+        max_elevation = max(max_elevation, sample['elevation_ft'])
+
+    # Compute flight path with climb and descent profiles
+    ac = AIRCRAFT_DATABASE[DEFAULT_AIRCRAFT]
+    dep_elev = samples[0]['elevation_ft']
+    dest_elev = samples[-1]['elevation_ft']
+    rpm = int(d.get('rpm', 2400))
+    cruise = get_cruise(cruise_altitude, rpm)
+    gs = cruise['true_airspeed']  # approximate GS (no wind for profile)
+
+    # Climb: interpolate distance to reach cruise altitude from departure elevation
+    climb_perf = ac['climb_performance']
+    climb_alts = sorted(climb_perf.keys())
+
+    def interp_climb_dist(target_alt):
+        """Get distance (NM) to climb from sea level to target_alt."""
+        if target_alt <= 0:
+            return 0
+        for j in range(len(climb_alts) - 1):
+            a1, a2 = climb_alts[j], climb_alts[j + 1]
+            if a1 <= target_alt <= a2:
+                frac = (target_alt - a1) / (a2 - a1)
+                d1, d2 = climb_perf[a1][2], climb_perf[a2][2]
+                return d1 + (d2 - d1) * frac
+        return climb_perf[climb_alts[-1]][2]
+
+    # Distance to climb from dep_elev to cruise_altitude
+    climb_dist = interp_climb_dist(cruise_altitude) - interp_climb_dist(dep_elev)
+    climb_dist = max(0, climb_dist)
+
+    # Descent: 500 fpm at cruise ground speed
+    descent_alt = cruise_altitude - dest_elev
+    if descent_alt > 0 and gs > 0:
+        descent_time_min = descent_alt / 500.0  # minutes at 500 fpm
+        descent_dist = (descent_time_min / 60.0) * gs  # NM
+    else:
+        descent_dist = 0
+
+    # Top of descent point — ensure it doesn't overlap with climb
+    tod_dist = max(climb_dist, cumulative_dist - descent_dist)
+
+    # If climb + descent exceed total distance, adjust both proportionally
+    if climb_dist + descent_dist > cumulative_dist:
+        ratio = cumulative_dist / (climb_dist + descent_dist)
+        climb_dist = climb_dist * ratio
+        descent_dist = descent_dist * ratio
+        tod_dist = climb_dist  # No cruise segment — go directly from climb to descent
+
+    # Assign flight_path_alt to each sample point
+    min_clearance = float('inf')
+    for sample in samples:
+        dist = sample['dist_nm']
+        if dist <= climb_dist and climb_dist > 0:
+            # Climbing phase: linear from dep_elev to cruise_altitude
+            frac = dist / climb_dist
+            sample['flight_alt'] = round(dep_elev + (cruise_altitude - dep_elev) * frac)
+        elif dist >= tod_dist and descent_dist > 0:
+            # Descending phase: linear from cruise_altitude to dest_elev
+            frac = (dist - tod_dist) / descent_dist if descent_dist > 0 else 1
+            frac = min(1.0, frac)
+            sample['flight_alt'] = round(cruise_altitude - (cruise_altitude - dest_elev) * frac)
+        else:
+            # Cruise phase
+            sample['flight_alt'] = cruise_altitude
+
+        clearance = sample['flight_alt'] - sample['elevation_ft']
+        # Skip departure/destination points for min clearance (on the ground)
+        if dist > 0.5 and dist < cumulative_dist - 0.5:
+            min_clearance = min(min_clearance, clearance)
+
+    if min_clearance == float('inf'):
+        min_clearance = cruise_altitude - max_elevation
+
+    return jsonify({
+        'success': True,
+        'profile': samples,
+        'cruise_altitude': cruise_altitude,
+        'max_terrain': round(max_elevation),
+        'min_clearance': round(min_clearance),
+        'vfr_clearance_ok': min_clearance >= 1000,
+        'ifr_mea_margin': min_clearance >= 2000,
+        'total_distance': round(cumulative_dist, 1),
+        'climb_distance': round(climb_dist, 1),
+        'descent_distance': round(descent_dist, 1),
+        'top_of_descent': round(tod_dist, 1),
+        'departure_elevation': dep_elev,
+        'destination_elevation': dest_elev
     })
 
 if __name__ == '__main__':
