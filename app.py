@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify, send_from_directory, abort
 from datetime import datetime, timedelta, timezone
 import math
 import os
@@ -17,7 +17,16 @@ except Exception:
 
 app = Flask(__name__)
 
-DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aviation_data.db')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_PATH = os.path.join(BASE_DIR, 'aviation_data.db')
+DOCS_DIR = os.path.join(BASE_DIR, 'docs')
+
+# Documentation available from the UI: url slug -> (filename, title)
+DOCS = {
+    'guide':      ('USER_GUIDE.md', 'User Guide'),
+    'user_guide': ('USER_GUIDE.md', 'User Guide'),
+    'quickstart': ('QUICKSTART.md', 'Quick Start'),
+}
 CHARTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'charts')
 AVIATION_WEATHER_BASE = 'https://aviationweather.gov/api/data'
 
@@ -522,6 +531,41 @@ def calc_landing(alt, temp, hw=0):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+def _resolve_doc(slug):
+    """Map a URL slug (or raw '.md' filename) to a docs entry."""
+    key = slug.lower().removesuffix('.md')
+    return DOCS.get(key)
+
+@app.route('/guide')
+@app.route('/guide/<slug>')
+def guide(slug='guide'):
+    """Render a documentation markdown file as a styled HTML page."""
+    entry = _resolve_doc(slug)
+    if not entry:
+        abort(404)
+    filename, title = entry
+    path = os.path.join(DOCS_DIR, filename)
+    if not os.path.exists(path):
+        abort(404)
+    with open(path, encoding='utf-8') as f:
+        text = f.read()
+    try:
+        import markdown
+        body = markdown.markdown(text, extensions=['tables', 'fenced_code', 'toc', 'sane_lists'])
+    except Exception:
+        # Fallback: show the raw markdown if the library is unavailable
+        from markupsafe import escape
+        body = f'<pre>{escape(text)}</pre>'
+    return render_template('guide.html', title=title, body=body, download=filename)
+
+@app.route('/docs/<path:filename>')
+def docs_download(filename):
+    """Download the raw markdown source of a doc."""
+    if not any(filename == fn for fn, _ in DOCS.values()):
+        abort(404)
+    return send_from_directory(DOCS_DIR, filename, as_attachment=True,
+                               mimetype='text/markdown')
 
 @app.route('/api/startup-status')
 def get_startup_status():
