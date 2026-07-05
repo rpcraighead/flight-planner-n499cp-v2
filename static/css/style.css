@@ -160,6 +160,7 @@ body {
   white-space: nowrap;
 }
 .toolbar-btn:hover { background: #2a2a2a; color: var(--text); }
+a.toolbar-btn { text-decoration: none; display: inline-flex; align-items: center; line-height: 1; }
 
 /* ── MAP WRAPPER ──────────────────────────────────────────── */
 #map-wrapper {
