@@ -11,7 +11,7 @@ import time
 
 app = Flask(__name__)
 
-DATABASE_PATH = 'aviation_data.db'
+DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aviation_data.db')
 CHARTS_DIR = 'charts'
 AVIATION_WEATHER_BASE = 'https://aviationweather.gov/api/data'
 
@@ -312,6 +312,20 @@ def download_database():
     finally:
         update_status['in_progress'] = False
 
+def auto_update_if_empty():
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM airports')
+    count = c.fetchone()[0]
+    conn.close()
+    if count == 0:
+        log_msg("Database empty — auto-starting aviation data download...")
+        threading.Thread(target=download_database, daemon=True).start()
+    else:
+        log_msg(f"Database ready: {count} airports")
+
+auto_update_if_empty()
+
 # Weather simulation
 def simulate_metar(station):
     now = get_utc_now()
@@ -514,6 +528,53 @@ def get_status():
     return jsonify({'in_progress': update_status['in_progress'], 'message': update_status['message'],
                    'progress': update_status['progress'], 'airports': cnt})
 
+@app.route('/api/nearest-airport')
+def nearest_airport():
+    try:
+        lat = float(request.args.get('lat', 0))
+        lon = float(request.args.get('lon', 0))
+        radius_nm = float(request.args.get('radius_nm', 20))
+    except (ValueError, TypeError):
+        return jsonify({'found': False, 'error': 'Invalid coordinates'})
+
+    cos_lat = math.cos(math.radians(lat))
+    lat_delta = radius_nm / 60.0
+    lon_delta = radius_nm / max(0.001, 60.0 * cos_lat)
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    c = conn.cursor()
+    results = []
+
+    c.execute('''SELECT icao, name, city, latitude, longitude, elevation
+                 FROM airports
+                 WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+                 LIMIT 100''',
+              (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta))
+    for row in c.fetchall():
+        d = gc_dist(lat, lon, row[3], row[4])
+        if d <= radius_nm:
+            results.append({'ident': row[0], 'name': row[1], 'city': row[2],
+                            'lat': row[3], 'lon': row[4], 'type': 'airport', 'distance_nm': round(d, 1)})
+
+    c.execute('''SELECT id, name, type, latitude, longitude
+                 FROM navaids
+                 WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
+                 LIMIT 50''',
+              (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta))
+    for row in c.fetchall():
+        d = gc_dist(lat, lon, row[3], row[4])
+        if d <= radius_nm:
+            results.append({'ident': row[0], 'name': row[1], 'type': row[2],
+                            'lat': row[3], 'lon': row[4], 'distance_nm': round(d, 1)})
+
+    conn.close()
+
+    if not results:
+        return jsonify({'found': False})
+
+    results.sort(key=lambda x: x['distance_nm'])
+    return jsonify({'found': True, 'nearest': results[:20]})
+
 @app.route('/api/airport-info/<icao>')
 def airport_info(icao):
     a = get_airport(icao.upper())
@@ -525,7 +586,8 @@ def calc_route():
     d = request.json
     dep, dest = d.get('departure','').upper(), d.get('destination','').upper()
     wpts = [w.upper() for w in d.get('waypoints', []) if w.strip()]
-    alt, rpm = int(d.get('cruise_altitude', 6000)), int(d.get('rpm', 2400))
+    alt, rpm = int(d.get('cruise_altitude', 6500)), int(d.get('rpm', 2400))
+    reserve_minutes = max(15, min(120, int(d.get('reserve_minutes', 45))))
     
     ac = AIRCRAFT_DATABASE[DEFAULT_AIRCRAFT]
     pts = [dep] + wpts + [dest]
@@ -568,7 +630,7 @@ def calc_route():
     dep_elev = coords[0]['data'].get('elevation', 0) if coords[0]['data'] else 0
     climb = get_climb(dep_elev, alt)
     taxi = ac['taxi_fuel']
-    reserve = 0.75 * cruise['fuel_flow_gph']
+    reserve = (reserve_minutes / 60.0) * cruise['fuel_flow_gph']
     
     return jsonify({
         'success': True, 'route_points': coords, 'segments': segs,
