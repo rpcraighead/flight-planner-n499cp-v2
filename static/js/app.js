@@ -1,906 +1,832 @@
-// Global state
+// ── State ──────────────────────────────────────────────────────
+let map = null;
+let routeLayer = null;
 let currentRoute = null;
-let vfrMap = null;
-let ifrMap = null;
-let vfrRouteLayer = null;
-let ifrRouteLayer = null;
 let tileSources = null;
+let planningMode = false;
+let drawerOpen = false;
+let terrainData = null;
+const tileLayers = {};
 
-// Check startup/loading status
-async function checkStartupStatus() {
-    // Skip chart pre-loading, go directly to app (uses online tiles)
-    document.getElementById('loading-screen').style.display = 'none';
-    document.getElementById('main-app').style.display = 'block';
-    initializeApp();
-}
+// Custom select values (used when "Custom..." is picked)
+let customAlt     = 6500;
+let customRpm     = 2400;
+let customReserve = 45;
 
-// Initialize the main application
-async function initializeApp() {
-    // Load tile sources
+// ── Init ───────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', async () => {
     try {
         const res = await fetch('/api/tile-sources');
-        const data = await res.json();
-        tileSources = data.tile_sources || data;
-    } catch (e) {
-        console.error('Failed to load tile sources:', e);
-        // Fallback (Updated January 2026)
+        tileSources = await res.json();
+    } catch {
         tileSources = {
-            vfr: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
-            ifr_low: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_AreaLow/MapServer/tile/{z}/{y}/{x}'
+            vfr:      'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
+            ifr_low:  'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_AreaLow/MapServer/tile/{z}/{y}/{x}',
+            ifr_high: 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_High/MapServer/tile/{z}/{y}/{x}',
         };
     }
-    
-    // Check database status
+    initMap();
     checkDbStatus();
+
+    document.getElementById('route-input').addEventListener('input', e => {
+        const pos = e.target.selectionStart;
+        e.target.value = e.target.value.toUpperCase();
+        e.target.setSelectionRange(pos, pos);
+    });
+    document.getElementById('route-input').addEventListener('keydown', e => {
+        if (e.key === 'Enter') calculateRoute(true);
+    });
+});
+
+// ── Map ────────────────────────────────────────────────────────
+function initMap() {
+    map = L.map('main-map', { zoomControl: true }).setView([32.82, -117.0], 9);
+
+    tileLayers.vfr = L.tileLayer(tileSources.vfr, {
+        attribution: '© FAA VFR Sectional', maxZoom: 12, minZoom: 5, errorTileUrl: ''
+    });
+    tileLayers.ifr_low = L.tileLayer(tileSources.ifr_low, {
+        attribution: '© FAA IFR Low Enroute', maxZoom: 12, minZoom: 4, errorTileUrl: ''
+    });
+    tileLayers.ifr_high = L.tileLayer(tileSources.ifr_high || 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_High/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '© FAA IFR High Enroute', maxZoom: 9, minZoom: 4, errorTileUrl: ''
+    });
+    tileLayers.sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: '© Esri World Imagery', maxZoom: 18
+    });
+    tileLayers.osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap', maxZoom: 19
+    });
+
+    tileLayers.vfr.addTo(map);
+    L.control.scale({ imperial: true, metric: false }).addTo(map);
+
+    map.on('click', async (e) => {
+        if (!planningMode) return;
+        const { lat, lng } = e.latlng;
+        let html;
+        try {
+            const res = await fetch(`/api/nearest-airport?lat=${lat}&lon=${lng}&radius_nm=20`);
+            const data = await res.json();
+            if (data.found && data.nearest.length > 0) {
+                const rows = data.nearest.slice(0, 4).map(a => {
+                    const label = a.type === 'airport'
+                        ? `${a.ident} — ${a.name} (${a.distance_nm} NM)`
+                        : `${a.ident} ${a.type} — ${a.name} (${a.distance_nm} NM)`;
+                    return `<div class="map-popup-row">
+                        <span class="map-popup-ident">${label}</span>
+                        <div class="map-popup-btns">
+                            <button onclick="mapInsert('${a.ident}','dep')">Dep</button>
+                            <button onclick="mapInsert('${a.ident}','wpt')">Wpt</button>
+                            <button onclick="mapInsert('${a.ident}','dest')">Dest</button>
+                        </div></div>`;
+                }).join('');
+                html = `<div class="map-popup"><strong>Nearest Fixes:</strong>${rows}</div>`;
+            } else {
+                html = `<div class="map-popup">No airports within 20 NM</div>`;
+            }
+        } catch { html = `<div class="map-popup">Lookup failed</div>`; }
+        L.popup({ maxWidth: 320 }).setLatLng(e.latlng).setContent(html).openOn(map);
+    });
 }
 
-// Tab switching
-document.querySelectorAll('.tab-button').forEach(btn => {
+// ── Route string helpers ───────────────────────────────────────
+function parseRoute(str) {
+    const parts = str.trim().toUpperCase().split(/\s+/).filter(Boolean);
+    if (parts.length < 2) return null;
+    return { departure: parts[0], destination: parts[parts.length - 1], waypoints: parts.slice(1, -1) };
+}
+
+function buildRoute(dep, wpts, dest) {
+    return [dep, ...wpts, dest].filter(Boolean).join(' ');
+}
+
+// ── Map popup actions (global) ─────────────────────────────────
+window.mapInsert = function(ident, role) {
+    const input = document.getElementById('route-input');
+    const parsed = parseRoute(input.value) || { departure: '', destination: '', waypoints: [] };
+    if (role === 'dep')       parsed.departure = ident;
+    else if (role === 'dest') parsed.destination = ident;
+    else                      parsed.waypoints.push(ident);
+    input.value = buildRoute(parsed.departure, parsed.waypoints, parsed.destination);
+    map.closePopup();
+};
+
+// ── Layer switcher ─────────────────────────────────────────────
+document.querySelectorAll('.layer-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-        const tab = btn.getAttribute('data-tab');
-        document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
-        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        const key = btn.dataset.layer;
+        Object.values(tileLayers).forEach(l => { if (map.hasLayer(l)) map.removeLayer(l); });
+        tileLayers[key].addTo(map);
+        document.querySelectorAll('.layer-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
-        document.getElementById(`${tab}-tab`).classList.add('active');
-        
-        if (tab === 'vfr-chart') {
-            setTimeout(() => initVfrMap(), 100);
-        } else if (tab === 'ifr-chart') {
-            setTimeout(() => initIfrMap(), 100);
-        } else if (tab === 'profile') {
-            setTimeout(() => { if (terrainData) drawTerrainProfile(); }, 100);
-        }
     });
 });
 
-// Initialize VFR Map
-function initVfrMap() {
-    const container = document.getElementById('vfr-map');
-    if (!container) return;
-    
-    if (vfrMap) {
-        vfrMap.invalidateSize();
-        return;
+// ── Plan mode ──────────────────────────────────────────────────
+document.getElementById('plan-mode-btn').addEventListener('click', () => {
+    planningMode = !planningMode;
+    const btn = document.getElementById('plan-mode-btn');
+    btn.classList.toggle('active', planningMode);
+    btn.textContent = planningMode ? '✈ Planning' : '✈ Plan';
+    map.getContainer().style.cursor = planningMode ? 'crosshair' : '';
+});
+
+// ── Fit route ──────────────────────────────────────────────────
+document.getElementById('fit-route-btn').addEventListener('click', () => {
+    if (!currentRoute) return;
+    const lls = currentRoute.route_points.map(p => [p.lat || p.latitude, p.lon || p.longitude]);
+    map.fitBounds(L.latLngBounds(lls).pad(0.15));
+});
+
+// ── Drawer ─────────────────────────────────────────────────────
+function openDrawer() {
+    drawerOpen = true;
+    document.getElementById('bottom-drawer').classList.add('open');
+    document.getElementById('drawer-arrow').textContent = '▼';
+    setTimeout(() => map && map.invalidateSize(), 240);
+}
+function closeDrawer() {
+    drawerOpen = false;
+    document.getElementById('bottom-drawer').classList.remove('open');
+    document.getElementById('drawer-arrow').textContent = '▲';
+    setTimeout(() => map && map.invalidateSize(), 240);
+}
+
+document.getElementById('drawer-toggle').addEventListener('click', () => {
+    drawerOpen ? closeDrawer() : openDrawer();
+});
+
+document.querySelectorAll('.drawer-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        const pane = tab.dataset.pane;
+        document.querySelectorAll('.drawer-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.drawer-pane').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`pane-${pane}`).classList.add('active');
+        if (pane === 'terrain' && terrainData) setTimeout(drawTerrainProfile, 50);
+    });
+});
+
+function switchDrawerTab(name) {
+    document.querySelectorAll('.drawer-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.drawer-pane').forEach(p => p.classList.remove('active'));
+    const tab = document.querySelector(`[data-pane="${name}"]`);
+    if (tab) tab.classList.add('active');
+    const pane = document.getElementById(`pane-${name}`);
+    if (pane) pane.classList.add('active');
+}
+
+// ── Modals ─────────────────────────────────────────────────────
+function openModal(id)  { document.getElementById(id).style.display = 'flex'; }
+function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+
+document.querySelectorAll('.modal-close').forEach(btn =>
+    btn.addEventListener('click', () => closeModal(btn.dataset.modal)));
+document.querySelectorAll('.modal-overlay').forEach(overlay =>
+    overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(overlay.id); }));
+
+document.getElementById('btn-perf').addEventListener('click', () => openModal('modal-perf'));
+document.getElementById('btn-wb').addEventListener('click',   () => openModal('modal-wb'));
+document.getElementById('btn-ref').addEventListener('click',  () => openModal('modal-ref'));
+
+// ── Custom value modal ─────────────────────────────────────────
+let pendingCustom = null;
+
+function promptCustom({ title, label, unit, hint, min, max, step, defaultVal, onConfirm, onCancel }) {
+    document.getElementById('cv-title').textContent = title;
+    document.getElementById('cv-label').textContent = label;
+    document.getElementById('cv-unit').textContent  = unit || '';
+    document.getElementById('cv-hint').textContent  = hint || '';
+    const inp = document.getElementById('cv-input');
+    inp.min = min ?? 0; inp.max = max ?? 99999; inp.step = step ?? 1;
+    inp.value = defaultVal ?? '';
+    pendingCustom = { onConfirm, onCancel };
+    openModal('modal-custom-value');
+    setTimeout(() => { inp.focus(); inp.select(); }, 80);
+}
+
+document.getElementById('cv-confirm').addEventListener('click', () => {
+    const val = parseFloat(document.getElementById('cv-input').value);
+    if (!isNaN(val) && pendingCustom) {
+        pendingCustom.onConfirm(val);
+        closeModal('modal-custom-value');
     }
-    
-    vfrMap = L.map('vfr-map').setView([32.82, -117.0], 9);
+});
+function cancelCustom() {
+    if (pendingCustom?.onCancel) pendingCustom.onCancel();
+    closeModal('modal-custom-value');
+}
+document.getElementById('cv-cancel').addEventListener('click', cancelCustom);
+document.getElementById('modal-custom-value').addEventListener('click', e => {
+    if (e.target === e.currentTarget) cancelCustom();
+});
+document.getElementById('cv-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('cv-confirm').click();
+    if (e.key === 'Escape') cancelCustom();
+});
 
-    // Use online FAA tiles directly
-    const vfrTiles = L.tileLayer(tileSources?.vfr || 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '© FAA VFR Sectional',
-        maxZoom: 12,
-        minZoom: 5,
-        errorTileUrl: ''
-    });
-
-    // Satellite
-    const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '© Esri',
-        maxZoom: 18
-    });
-
-    // OSM
-    const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap',
-        maxZoom: 19
-    });
-
-    vfrTiles.addTo(vfrMap);
-
-    L.control.layers({
-        'VFR Sectional': vfrTiles,
-        'Satellite': satellite,
-        'Street Map': osm
-    }, {}, { position: 'topright' }).addTo(vfrMap);
-    
-    L.control.scale({ imperial: true, metric: false }).addTo(vfrMap);
-    
-    if (currentRoute) updateVfrRoute();
+// Helper: update a select's "Custom..." option label and keep it selected
+function setCustomOption(selectId, displayText, numericValue) {
+    const sel = document.getElementById(selectId);
+    const opt = sel.querySelector('option[value="custom"]');
+    opt.textContent = displayText;
+    sel.value = 'custom';
+    // store for next time
+    sel.dataset.customVal = numericValue;
 }
 
-// Initialize IFR Map
-function initIfrMap() {
-    const container = document.getElementById('ifr-map');
-    if (!container) return;
-    
-    if (ifrMap) {
-        ifrMap.invalidateSize();
-        return;
-    }
-    
-    ifrMap = L.map('ifr-map').setView([32.82, -117.0], 8);
+// ── Altitude select ────────────────────────────────────────────
+(function() {
+    const sel = document.getElementById('alt-select');
+    sel.dataset.prev = sel.value;
 
-    // Use online FAA tiles directly (Updated January 2026)
-    const ifrTiles = L.tileLayer(tileSources?.ifr_low || 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_AreaLow/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '© FAA IFR Low Enroute',
-        maxZoom: 12,
-        minZoom: 4,
-        errorTileUrl: ''
-    });
-
-    const ifrHighTiles = L.tileLayer('https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_High/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '© FAA IFR High Enroute',
-        maxZoom: 9,
-        minZoom: 4,
-        errorTileUrl: ''
-    });
-
-    // Dark base
-    const dark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-        attribution: '© CartoDB',
-        maxZoom: 19
-    });
-
-    ifrTiles.addTo(ifrMap);
-
-    L.control.layers({
-        'IFR Low Enroute': ifrTiles,
-        'IFR High Enroute': ifrHighTiles,
-        'Dark Map': dark
-    }, {}, { position: 'topright' }).addTo(ifrMap);
-    
-    L.control.scale({ imperial: true, metric: false }).addTo(ifrMap);
-    
-    if (currentRoute) updateIfrRoute();
-}
-
-// Update VFR map with route
-function updateVfrRoute() {
-    if (!vfrMap || !currentRoute) return;
-
-    if (vfrRouteLayer) vfrMap.removeLayer(vfrRouteLayer);
-    vfrRouteLayer = L.layerGroup().addTo(vfrMap);
-
-    const points = currentRoute.route_points;
-    const latlngs = points.map(p => [p.lat || p.latitude, p.lon || p.longitude]);
-
-    // Route line with white outline
-    L.polyline(latlngs, { color: '#ffffff', weight: 8, opacity: 0.9 }).addTo(vfrRouteLayer);
-    L.polyline(latlngs, { color: '#bf0a30', weight: 4, opacity: 1 }).addTo(vfrRouteLayer);
-
-    // Markers
-    points.forEach((pt, idx) => {
-        let color = '#1e3a5f', radius = 8;
-        if (idx === 0) { color = '#28a745'; radius = 12; }
-        else if (idx === points.length - 1) { color = '#bf0a30'; radius = 12; }
-
-        L.circleMarker([pt.lat || pt.latitude, pt.lon || pt.longitude], {
-            radius, fillColor: color, color: '#ffffff', weight: 3, fillOpacity: 1
-        }).bindTooltip(pt.identifier, {
-            permanent: true, direction: 'top', offset: [0, -12], className: 'map-label'
-        }).addTo(vfrRouteLayer);
-    });
-
-    vfrMap.fitBounds(L.latLngBounds(latlngs).pad(0.15));
-}
-
-// Update IFR map with route
-function updateIfrRoute() {
-    if (!ifrMap || !currentRoute) return;
-
-    if (ifrRouteLayer) ifrMap.removeLayer(ifrRouteLayer);
-    ifrRouteLayer = L.layerGroup().addTo(ifrMap);
-
-    const points = currentRoute.route_points;
-    const latlngs = points.map(p => [p.lat || p.latitude, p.lon || p.longitude]);
-
-    // Magenta for IFR
-    L.polyline(latlngs, { color: '#ffffff', weight: 8, opacity: 0.9 }).addTo(ifrRouteLayer);
-    L.polyline(latlngs, { color: '#ff00ff', weight: 4, opacity: 1 }).addTo(ifrRouteLayer);
-
-    points.forEach((pt, idx) => {
-        let color = '#1e3a5f', radius = 8;
-        if (idx === 0) { color = '#28a745'; radius = 12; }
-        else if (idx === points.length - 1) { color = '#bf0a30'; radius = 12; }
-
-        L.circleMarker([pt.lat || pt.latitude, pt.lon || pt.longitude], {
-            radius, fillColor: color, color: '#ffffff', weight: 3, fillOpacity: 1
-        }).bindTooltip(pt.identifier, {
-            permanent: true, direction: 'top', offset: [0, -12], className: 'map-label'
-        }).addTo(ifrRouteLayer);
-    });
-
-    ifrMap.fitBounds(L.latLngBounds(latlngs).pad(0.15));
-}
-
-// Airport inputs
-document.querySelectorAll('.airport-input').forEach(input => {
-    input.addEventListener('input', e => e.target.value = e.target.value.toUpperCase());
-    input.addEventListener('blur', async e => {
-        const icao = e.target.value.trim();
-        const infoDiv = e.target.parentElement.querySelector('.airport-info');
-        if (icao.length >= 3 && infoDiv) {
-            try {
-                const res = await fetch(`/api/airport-info/${icao}`);
-                const data = await res.json();
-                if (data.success) {
-                    const apt = data.airport;
-                    const rwy = data.runways[0];
-                    infoDiv.innerHTML = `${apt.name}<br>Elev: ${apt.elevation}' ${rwy ? `• Rwy: ${rwy.length}'` : ''}`;
-                } else {
-                    infoDiv.innerHTML = '<span style="color:#bf0a30;">Not found</span>';
-                }
-            } catch { infoDiv.innerHTML = ''; }
+    sel.addEventListener('change', function() {
+        if (this.value !== 'custom') {
+            customAlt = parseInt(this.value);
+            this.dataset.prev = this.value;
+            return;
         }
+        const prev = this.dataset.prev;
+        promptCustom({
+            title:      'Custom Altitude',
+            label:      'Cruise altitude',
+            unit:       'ft MSL',
+            hint:       'VFR hemispheric rule: odd thousands +500 ft eastbound (0°–179°), even thousands +500 ft westbound (180°–359°). Class A starts at FL180.',
+            min: 500, max: 17500, step: 100,
+            defaultVal: customAlt,
+            onConfirm: val => {
+                customAlt = Math.round(val);
+                setCustomOption('alt-select', `${customAlt.toLocaleString()} ft`, customAlt);
+                this.dataset.prev = 'custom';
+            },
+            onCancel: () => {
+                this.value = prev;
+            }
+        });
     });
-});
+})();
 
-// Waypoints
-document.getElementById('add-waypoint').addEventListener('click', () => {
-    const container = document.getElementById('waypoints-container');
-    const div = document.createElement('div');
-    div.className = 'waypoint-item';
-    div.innerHTML = `<input type="text" class="waypoint-input" placeholder="FIX" maxlength="5"><button class="remove-waypoint">×</button>`;
-    container.appendChild(div);
-    div.querySelector('input').addEventListener('input', e => e.target.value = e.target.value.toUpperCase());
-    div.querySelector('.remove-waypoint').addEventListener('click', () => div.remove());
-});
+// ── RPM select ─────────────────────────────────────────────────
+(function() {
+    const sel = document.getElementById('rpm-select');
+    sel.dataset.prev = sel.value;
 
-function getWaypoints() {
-    return Array.from(document.querySelectorAll('.waypoint-input'))
-        .map(input => input.value.trim().toUpperCase())
-        .filter(v => v.length > 0);
-}
+    sel.addEventListener('change', function() {
+        if (this.value !== 'custom') {
+            customRpm = parseInt(this.value);
+            this.dataset.prev = this.value;
+            return;
+        }
+        const prev = this.dataset.prev;
+        promptCustom({
+            title:      'Custom RPM',
+            label:      'Engine RPM',
+            unit:       'RPM',
+            hint:       'C172S normal cruise range: 2200–2700 RPM. Do not exceed 2700 RPM (redline).',
+            min: 1500, max: 2700, step: 50,
+            defaultVal: customRpm,
+            onConfirm: val => {
+                customRpm = Math.round(val / 50) * 50;
+                setCustomOption('rpm-select', `${customRpm} RPM`, customRpm);
+                this.dataset.prev = 'custom';
+            },
+            onCancel: () => {
+                this.value = prev;
+            }
+        });
+    });
+})();
 
-// Database status
+// ── Reserve select ─────────────────────────────────────────────
+(function() {
+    const sel = document.getElementById('reserve-select');
+    sel.dataset.prev = sel.value;
+
+    sel.addEventListener('change', function() {
+        if (this.value !== 'custom') {
+            customReserve = parseInt(this.value);
+            this.dataset.prev = this.value;
+            return;
+        }
+        const prev = this.dataset.prev;
+        promptCustom({
+            title:      'Custom Reserve',
+            label:      'Fuel reserve',
+            unit:       'min',
+            hint:       'FAA minimums: VFR day 30 min, VFR night 45 min. IFR: 45 min at dest alternate. Extra margin recommended.',
+            min: 15, max: 120, step: 5,
+            defaultVal: customReserve,
+            onConfirm: val => {
+                customReserve = Math.round(val);
+                setCustomOption('reserve-select', `Rsv: ${customReserve} min`, customReserve);
+                this.dataset.prev = 'custom';
+            },
+            onCancel: () => {
+                this.value = prev;
+            }
+        });
+    });
+})();
+
+// ── Database status ────────────────────────────────────────────
 async function checkDbStatus() {
     try {
-        const res = await fetch('/api/update-status');
+        const res  = await fetch('/api/update-status');
         const data = await res.json();
-        
-        const indicator = document.getElementById('db-indicator');
-        const countEl = document.getElementById('db-count');
-        
+        const dot  = document.getElementById('db-dot');
+        const lbl  = document.getElementById('db-label');
         if (data.airports > 0) {
-            indicator.classList.add('ready');
-            countEl.textContent = `${data.airports.toLocaleString()} airports`;
+            dot.classList.add('ready');
+            lbl.textContent = `${data.airports.toLocaleString()} apts`;
         } else {
-            indicator.classList.remove('ready');
-            countEl.textContent = 'No data - click Update';
+            dot.classList.remove('ready');
+            lbl.textContent = 'No data';
         }
-        
         if (data.in_progress) {
-            document.getElementById('update-modal').style.display = 'flex';
-            document.getElementById('progress-fill').style.width = `${data.progress}%`;
-            document.getElementById('update-message').textContent = data.message;
+            openModal('modal-db');
+            document.getElementById('db-progress-fill').style.width = data.progress + '%';
+            document.getElementById('db-progress-msg').textContent  = data.message;
             setTimeout(checkDbStatus, 1000);
         } else {
-            document.getElementById('update-modal').style.display = 'none';
+            closeModal('modal-db');
         }
-    } catch (e) { console.error(e); }
+    } catch {}
 }
 
-document.getElementById('update-db-btn').addEventListener('click', async () => {
+document.getElementById('btn-update-db').addEventListener('click', async () => {
     await fetch('/api/update-database', { method: 'POST' });
-    document.getElementById('update-modal').style.display = 'flex';
+    openModal('modal-db');
     setTimeout(checkDbStatus, 500);
 });
 
-// Route calculation
-document.getElementById('calculate-route').addEventListener('click', async () => {
-    const departure = document.getElementById('departure').value.trim().toUpperCase();
-    const destination = document.getElementById('destination').value.trim().toUpperCase();
-    const waypoints = getWaypoints();
-    const cruiseAlt = document.getElementById('cruise-altitude').value;
-    const rpm = document.getElementById('cruise-rpm').value;
-    
-    if (!departure || !destination) {
-        alert('Please enter departure and destination');
-        return;
-    }
-    
+// ── Snap scoring ───────────────────────────────────────────────
+const SNAP_WEIGHT = {
+    'VORTAC': 0.30, 'VOR-DME': 0.30, 'VOR': 0.30,
+    'NDB-DME': 0.45, 'TACAN': 0.45, 'NDB': 0.60, 'DME': 0.60
+};
+function snapScore(r) {
+    const w = SNAP_WEIGHT[r.type];
+    if (w) return r.distance_nm * w;
+    return r.distance_nm * (/^K[A-Z]{3}$/.test(r.ident) ? 0.80 : 1.30);
+}
+async function snapToNearest(lat, lon) {
     try {
-        const res = await fetch('/api/calculate-route', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ departure, destination, waypoints, cruise_altitude: cruiseAlt, rpm })
-        });
-        
+        const res  = await fetch(`/api/nearest-airport?lat=${lat}&lon=${lon}&radius_nm=25`);
         const data = await res.json();
-        if (!data.success) { alert('Error: ' + data.error); return; }
-        
-        currentRoute = data;
-        
-        document.getElementById('route-string').textContent = data.route_points.map(p => p.identifier).join(' → ');
-        document.getElementById('total-distance').textContent = data.totals.distance_nm;
-        document.getElementById('total-time').textContent = data.totals.time_minutes;
-        document.getElementById('total-fuel').textContent = data.totals.total_fuel;
-        
-        const winds = data.winds_aloft;
-        document.getElementById('winds-data').textContent = `${winds.altitude}': ${winds.direction}° @ ${winds.speed}kt`;
-        
-        document.getElementById('route-segments').innerHTML = data.segments.map(seg => `
-            <tr><td>${seg.from}</td><td>${seg.to}</td><td>${seg.distance_nm}</td>
-            <td>${seg.true_course}°</td><td>${seg.wind_correction > 0 ? '+' : ''}${seg.wind_correction}°</td>
-            <td>${seg.magnetic_heading}°</td><td>${seg.ground_speed}</td>
-            <td>${seg.time_minutes}</td><td>${seg.fuel_gallons}</td></tr>
-        `).join('');
-        
-        document.getElementById('fuel-taxi').textContent = data.totals.taxi_fuel + ' gal';
-        document.getElementById('fuel-climb').textContent = data.totals.climb_fuel + ' gal';
-        document.getElementById('fuel-cruise').textContent = data.totals.cruise_fuel + ' gal';
-        document.getElementById('fuel-reserve').textContent = data.totals.reserve_fuel + ' gal';
-        document.getElementById('fuel-total-req').innerHTML = `<strong>${data.totals.total_fuel} gal</strong>`;
-        
-        document.getElementById('route-results').style.display = 'block';
+        if (!data.found || !data.nearest.length) return null;
+        return [...data.nearest].sort((a, b) => snapScore(a) - snapScore(b))[0].ident;
+    } catch { return null; }
+}
 
-        if (vfrMap) updateVfrRoute();
-        if (ifrMap) updateIfrRoute();
+function insertWptAtIndex(ident, segIdx) {
+    const input  = document.getElementById('route-input');
+    const parsed = parseRoute(input.value) || { departure: '', destination: '', waypoints: [] };
+    parsed.waypoints.splice(segIdx, 0, ident);
+    input.value = buildRoute(parsed.departure, parsed.waypoints, parsed.destination);
+}
 
-        // Fetch airport details and terrain profile in background
-        try { fetchAirportDetails(); } catch (e) { console.error('Airport details failed:', e); }
-        try { fetchTerrainProfile(); } catch (e) { console.error('Terrain profile failed:', e); }
+// ── Route calculation ──────────────────────────────────────────
+async function calculateRoute(alertOnError = true) {
+    const input  = document.getElementById('route-input');
+    const parsed = parseRoute(input.value);
+    if (!parsed) {
+        if (alertOnError) alert('Enter a route: KSEE OCN KMYF');
+        return false;
+    }
+    const { departure, destination, waypoints } = parsed;
+    const altVal  = document.getElementById('alt-select').value;
+    const rpmVal  = document.getElementById('rpm-select').value;
+    const resVal  = document.getElementById('reserve-select').value;
+    const cruiseAlt      = altVal === 'custom' ? customAlt      : parseInt(altVal);
+    const rpm            = rpmVal === 'custom' ? customRpm      : parseInt(rpmVal);
+    const reserveMinutes = resVal === 'custom' ? customReserve  : parseInt(resVal);
 
-        // Automatically fetch weather briefing after successful route calculation
-        // Wrapped in try-catch so it doesn't break route calculation if it fails
-        try {
-            await fetchWeatherBriefing(departure, destination, waypoints, false);
-        } catch (briefingError) {
-            console.error('Weather briefing failed, but route calculation succeeded:', briefingError);
-        }
-
-    } catch (e) { alert('Error: ' + e.message); }
-});
-
-// Weather briefing function (reusable) - v3.2 with fixed route plotting coordinates
-async function fetchWeatherBriefing(departure, destination, waypoints, autoSwitch = false) {
     try {
-        const res = await fetch('/api/weather-briefing', {
+        const res  = await fetch('/api/calculate-route', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ departure, destination, waypoints })
+            body: JSON.stringify({ departure, destination, waypoints, cruise_altitude: cruiseAlt, rpm, reserve_minutes: reserveMinutes })
         });
-
-        // Check if response is ok before parsing
-        if (!res.ok) {
-            console.error('Weather briefing request failed:', res.status, res.statusText);
-            return false;
-        }
-
-        // Check content type to ensure we're getting JSON
-        const contentType = res.headers.get('content-type');
-        if (!contentType || !contentType.includes('application/json')) {
-            console.error('Weather briefing returned non-JSON response');
-            return false;
-        }
-
-        // Safely parse JSON with additional error handling
-        let data;
-        try {
-            data = await res.json();
-        } catch (jsonError) {
-            console.error('Failed to parse weather briefing response as JSON:', jsonError);
-            return false;
-        }
-
+        const data = await res.json();
         if (!data.success) {
-            console.error('Error fetching briefing');
+            if (alertOnError) alert('Error: ' + data.error);
             return false;
         }
+        currentRoute = data;
 
-        const b = data.briefing;
-        document.getElementById('briefing-time').textContent = b.generated_at;
-        document.getElementById('briefing-route').textContent = b.route;
+        // Summary bar
+        const w = data.winds_aloft;
+        document.getElementById('s-dist').textContent  = data.totals.distance_nm;
+        document.getElementById('s-time').textContent  = data.totals.time_minutes;
+        document.getElementById('s-fuel').textContent  = data.totals.total_fuel;
+        document.getElementById('s-winds').textContent = `${w.direction}°/${w.speed}kt`;
 
-        document.getElementById('metars-content').innerHTML = b.metars?.length > 0
-            ? b.metars.map(m => `<div class="metar-item"><span class="station">${m.icaoId||'N/A'}</span>
-                <span class="flight-cat ${(m.fltcat||'VFR').toLowerCase()}">${m.fltcat||'VFR'}</span>
-                ${m.simulated?'<span style="color:#bf0a30;"> (sim)</span>':''}<br>${m.rawOb||'No data'}</div>`).join('')
-            : '<p class="no-data">No METAR data</p>';
+        // Segment table
+        document.getElementById('log-tbody').innerHTML = data.segments.map(s => `
+            <tr>
+              <td>${s.from}</td><td>${s.to}</td><td>${s.distance_nm}</td>
+              <td>${s.true_course}°</td>
+              <td>${s.wind_correction > 0 ? '+' : ''}${s.wind_correction}°</td>
+              <td>${s.magnetic_heading}°</td><td>${s.ground_speed}</td>
+              <td>${s.time_minutes}</td><td>${s.fuel_gallons}</td>
+            </tr>`).join('');
 
-        document.getElementById('tafs-content').innerHTML = b.tafs?.length > 0
-            ? b.tafs.map(t => `<div class="taf-item"><span class="station">${t.icaoId||'N/A'}</span>
-                ${t.simulated?'<span style="color:#bf0a30;"> (sim)</span>':''}<br>${t.rawTAF||'No data'}</div>`).join('')
-            : '<p class="no-data">No TAF data</p>';
+        // Fuel summary
+        document.getElementById('ft-taxi').textContent    = data.totals.taxi_fuel    + ' gal';
+        document.getElementById('ft-climb').textContent   = data.totals.climb_fuel   + ' gal';
+        document.getElementById('ft-cruise').textContent  = data.totals.cruise_fuel  + ' gal';
+        document.getElementById('ft-reserve').textContent = data.totals.reserve_fuel + ' gal';
+        document.getElementById('ft-total').textContent   = data.totals.total_fuel   + ' gal';
 
-        if (b.winds_aloft?.levels) {
-            let html = '<table class="winds-table"><tr><th>Alt</th><th>Dir</th><th>Spd</th><th>Temp</th></tr>';
-            for (const [alt, d] of Object.entries(b.winds_aloft.levels)) {
-                html += `<tr><td>${alt}'</td><td>${d.direction}°</td><td>${d.speed}kt</td><td>${d.temp}°C</td></tr>`;
-            }
-            document.getElementById('winds-content').innerHTML = html + '</table>';
-        } else {
-            document.getElementById('winds-content').innerHTML = '<p class="no-data">No winds data</p>';
-        }
+        document.getElementById('log-empty').style.display   = 'none';
+        document.getElementById('log-content').style.display = 'block';
 
-        document.getElementById('pireps-content').innerHTML = '<p class="no-data">No PIREPs</p>';
-        document.getElementById('sigmets-content').innerHTML = '<p class="no-data">No AIRMETs/SIGMETs</p>';
-        document.getElementById('tfrs-content').innerHTML = '<p class="no-data">Check tfr.faa.gov</p>';
-        document.getElementById('notams-content').innerHTML = b.notams?.length > 0
-            ? b.notams.map(n => `<div class="notam-item"><strong>${n.airport}</strong>: ${n.text}</div>`).join('')
-            : '<p class="no-data">No NOTAMs</p>';
+        drawRouteOnMap();
+        openDrawer();
+        switchDrawerTab('log');
 
-        document.getElementById('no-briefing').style.display = 'none';
-        document.getElementById('briefing-content').style.display = 'block';
-
-        // Only auto-switch to briefing tab if requested
-        if (autoSwitch) {
-            document.querySelector('[data-tab="briefing"]').click();
-        }
+        // Async: weather, airports, terrain
+        fetchWeatherBriefing(departure, destination, waypoints).catch(() => {});
+        fetchAirportDetails().catch(() => {});
+        fetchTerrainProfile().catch(() => {});
 
         return true;
     } catch (e) {
-        console.error('Error fetching briefing:', e);
+        if (alertOnError) alert('Error: ' + e.message);
         return false;
     }
 }
 
-// Performance
-document.getElementById('calc-takeoff').addEventListener('click', async () => {
-    try {
-        const res = await fetch('/api/performance/takeoff', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                weight: document.getElementById('to-weight').value,
-                pressure_altitude: document.getElementById('to-altitude').value,
-                temperature: document.getElementById('to-temp').value,
-                headwind: document.getElementById('to-wind').value
-            })
-        });
-        const r = await res.json();
-        document.getElementById('to-ground-roll').textContent = r.ground_roll;
-        document.getElementById('to-total').textContent = r.total_over_50ft;
-        document.getElementById('takeoff-results').style.display = 'block';
-    } catch (e) { alert('Error: ' + e.message); }
-});
+document.getElementById('calc-btn').addEventListener('click', () => calculateRoute(true));
 
-document.getElementById('calc-landing').addEventListener('click', async () => {
-    try {
-        const res = await fetch('/api/performance/landing', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                pressure_altitude: document.getElementById('land-altitude').value,
-                temperature: document.getElementById('land-temp').value,
-                headwind: document.getElementById('land-wind').value
-            })
-        });
-        const r = await res.json();
-        document.getElementById('land-ground-roll').textContent = r.ground_roll;
-        document.getElementById('land-total').textContent = r.total_over_50ft;
-        document.getElementById('landing-results').style.display = 'block';
-    } catch (e) { alert('Error: ' + e.message); }
-});
+// ── Route drawing ──────────────────────────────────────────────
+function drawRouteOnMap() {
+    if (!map || !currentRoute) return;
+    if (routeLayer) map.removeLayer(routeLayer);
 
-// W&B
-document.getElementById('calc-wb').addEventListener('click', async () => {
-    try {
-        const res = await fetch('/api/weight-balance', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                empty_weight: document.getElementById('wb-empty-weight').value,
-                empty_moment: document.getElementById('wb-empty-moment').value,
-                pilot_weight: document.getElementById('wb-pilot').value,
-                front_passenger_weight: document.getElementById('wb-front-pax').value,
-                rear_passenger_weight: document.getElementById('wb-rear-pax').value,
-                baggage_weight: document.getElementById('wb-baggage').value,
-                fuel_gallons: document.getElementById('wb-fuel').value
-            })
-        });
-        const r = await res.json();
-        
-        document.getElementById('wb-total-weight').textContent = r.total_weight;
-        document.getElementById('wb-cg').textContent = r.cg;
-        document.getElementById('wb-moment').textContent = r.moment_1000;
-        
-        const status = document.getElementById('wb-status');
-        if (r.within_all_limits) {
-            status.className = 'status-message success';
-            status.textContent = '✓ Within all limits';
-        } else {
-            status.className = 'status-message danger';
-            status.textContent = '⚠ ' + (!r.within_weight_limits ? `OVERWEIGHT by ${Math.abs(r.weight_margin)} lbs ` : '') +
-                                (!r.within_cg_limits ? 'CG OUT OF LIMITS' : '');
-        }
-        document.getElementById('wb-results').style.display = 'block';
-    } catch (e) { alert('Error: ' + e.message); }
-});
-
-// Airports Tab
-async function fetchAirportDetails() {
-    if (!currentRoute || !currentRoute.route_points) return;
-
+    const layer  = L.layerGroup().addTo(map);
+    routeLayer   = layer;
     const points = currentRoute.route_points;
-    // Get unique airport identifiers (departure, waypoints, destination)
-    const airports = points.filter(p => p.type === 'airport').map(p => p.identifier);
-    if (airports.length === 0) return;
+    const lls    = points.map(p => [p.lat || p.latitude, p.lon || p.longitude]);
 
-    const container = document.getElementById('airports-cards');
-    container.innerHTML = '<div class="profile-loading"><span class="spinner"></span> Loading airport data...</div>';
-    document.getElementById('no-airports').style.display = 'none';
-    document.getElementById('airports-content').style.display = 'block';
+    // Halo + route line
+    L.polyline(lls, { color: '#ffffff', weight: 7, opacity: 0.5 }).addTo(layer);
+    L.polyline(lls, { color: '#bf0a30', weight: 3, opacity: 1   }).addTo(layer);
+
+    // Rubber-band midpoint handles
+    for (let i = 0; i < lls.length - 1; i++) {
+        const midLat = (lls[i][0] + lls[i+1][0]) / 2;
+        const midLng = (lls[i][1] + lls[i+1][1]) / 2;
+        const handle = L.marker([midLat, midLng], {
+            icon: L.divIcon({
+                className: 'rb-handle-icon',
+                html: '<div class="rb-dot"></div>',
+                iconSize: [13, 13], iconAnchor: [6, 6]
+            }),
+            draggable: true, zIndexOffset: -200
+        });
+        const segIdx = i;
+        handle.on('dragend', async e => {
+            const { lat, lng } = e.target.getLatLng();
+            const ident = await snapToNearest(lat, lng);
+            if (!ident) { e.target.setLatLng([midLat, midLng]); return; }
+            insertWptAtIndex(ident, segIdx);
+            await calculateRoute(false);
+        });
+        handle.addTo(layer);
+    }
+
+    // Waypoint markers (draggable)
+    points.forEach((pt, idx) => {
+        const ll = [pt.lat || pt.latitude, pt.lon || pt.longitude];
+        let fill = '#3b82f6', r = 7;
+        if (idx === 0)                      { fill = '#28a745'; r = 10; }
+        else if (idx === points.length - 1) { fill = '#bf0a30'; r = 10; }
+
+        const marker = L.marker(ll, {
+            icon: L.divIcon({
+                className: 'wpt-drag-icon',
+                html: `<div style="background:${fill};width:${r*2}px;height:${r*2}px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);margin-left:${-r}px;margin-top:${-r}px;cursor:grab"></div>`,
+                iconSize: [r*2, r*2], iconAnchor: [r, r]
+            }),
+            draggable: true, zIndexOffset: 100
+        });
+        marker.bindTooltip(pt.identifier, {
+            permanent: true, direction: 'top', offset: [0, -r-3], className: 'map-label'
+        });
+        marker.on('dragend', async e => {
+            const { lat, lng } = e.target.getLatLng();
+            const ident = await snapToNearest(lat, lng);
+            if (!ident) { e.target.setLatLng(ll); return; }
+            const parsed = parseRoute(document.getElementById('route-input').value) || { departure:'', destination:'', waypoints:[] };
+            if      (idx === 0)                      parsed.departure  = ident;
+            else if (idx === points.length - 1)      parsed.destination = ident;
+            else                                     parsed.waypoints[idx - 1] = ident;
+            document.getElementById('route-input').value = buildRoute(parsed.departure, parsed.waypoints, parsed.destination);
+            await calculateRoute(false);
+        });
+        marker.addTo(layer);
+    });
+
+    map.fitBounds(L.latLngBounds(lls).pad(0.15));
+}
+
+// ── Weather ────────────────────────────────────────────────────
+async function fetchWeatherBriefing(departure, destination, waypoints) {
+    const res = await fetch('/api/weather-briefing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ departure, destination, waypoints })
+    });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!data.success) return;
+    const b = data.briefing;
+
+    const metHtml = b.metars?.length
+        ? `<h5>METARs</h5>` + b.metars.map(m =>
+            `<div class="wx-item"><span class="wx-id">${m.icaoId||'?'}</span>` +
+            `<span class="fltcat ${(m.fltcat||'vfr').toLowerCase()}">${(m.fltcat||'VFR').toUpperCase()}</span>` +
+            `${m.simulated ? ' <span style="color:#bf0a30;font-size:0.65rem">(sim)</span>' : ''}<br>${m.rawOb||'No data'}</div>`
+          ).join('')
+        : '';
+
+    const tafHtml = b.tafs?.length
+        ? `<h5>TAFs</h5>` + b.tafs.map(t =>
+            `<div class="wx-item"><span class="wx-id">${t.icaoId||'?'}</span>` +
+            `${t.simulated ? ' <span style="color:#bf0a30;font-size:0.65rem">(sim)</span>' : ''}<br>${t.rawTAF||'No data'}</div>`
+          ).join('')
+        : '';
+
+    let windsHtml = '';
+    if (b.winds_aloft?.levels) {
+        windsHtml = `<h5>Winds Aloft</h5><table class="winds-table"><thead><tr><th>ALT</th><th>DIR</th><th>SPD</th><th>TEMP</th></tr></thead><tbody>`;
+        for (const [alt, d] of Object.entries(b.winds_aloft.levels))
+            windsHtml += `<tr><td>${alt}'</td><td>${d.direction}°</td><td>${d.speed}kt</td><td>${d.temp}°C</td></tr>`;
+        windsHtml += '</tbody></table>';
+    }
+
+    const notamHtml = b.notams?.length
+        ? `<h5>NOTAMs</h5>` + b.notams.map(n => `<div class="wx-item"><strong>${n.airport}</strong>: ${n.text}</div>`).join('')
+        : '';
+
+    document.getElementById('wx-metars').innerHTML = metHtml;
+    document.getElementById('wx-tafs').innerHTML   = tafHtml;
+    document.getElementById('wx-winds').innerHTML  = windsHtml;
+    document.getElementById('wx-notams').innerHTML = notamHtml;
+    document.getElementById('wx-empty').style.display   = 'none';
+    document.getElementById('wx-content').style.display = 'block';
+}
+
+// ── Airport details ────────────────────────────────────────────
+async function fetchAirportDetails() {
+    if (!currentRoute?.route_points) return;
+    const airports = currentRoute.route_points.filter(p => p.type === 'airport').map(p => p.identifier);
+    if (!airports.length) return;
 
     let html = '';
     for (const icao of airports) {
         try {
-            const res = await fetch(`/api/airport-detail/${icao}`);
+            const res  = await fetch(`/api/airport-detail/${icao}`);
             const data = await res.json();
             if (!data.success) continue;
-
-            const apt = data.airport;
-            const runways = data.runways;
-            const metar = data.metar;
-            const fltcat = (metar?.fltcat || metar?.fltCat || 'VFR').toUpperCase();
-            const fltcatClass = fltcat.toLowerCase();
-
-            html += `<div class="airport-detail-card">
-                <h3>${icao} <span class="flight-cat-badge ${fltcatClass}">${fltcat}</span></h3>
-                <div class="airport-name">${apt.name} — ${apt.city}, ${apt.state}</div>
-                <div class="airport-detail-grid">
-                    <div class="airport-info-section">
-                        <h4>Airport Info</h4>
-                        <div class="airport-info-row"><span class="label">Elevation</span><span class="value">${apt.elevation}' MSL</span></div>
-                        <div class="airport-info-row"><span class="label">Latitude</span><span class="value">${apt.latitude.toFixed(4)}°</span></div>
-                        <div class="airport-info-row"><span class="label">Longitude</span><span class="value">${apt.longitude.toFixed(4)}°</span></div>
-                        <div class="airport-info-row"><span class="label">FAA ID</span><span class="value">${data.faa_id}</span></div>
-
-                        <h4 style="margin-top:1rem;">Current Weather</h4>
-                        <div class="metar-box ${metar?.simulated ? 'simulated' : ''}">${metar?.rawOb || 'No METAR available'}${metar?.simulated ? '<br><em>(simulated)</em>' : ''}</div>
-                    </div>
-                    <div class="airport-info-section">
-                        <h4>Runways</h4>
-                        ${runways.length > 0 ? `
-                        <table class="runway-table">
-                            <thead><tr><th>Runway</th><th>Length</th><th>Surface</th></tr></thead>
-                            <tbody>${runways.map(r => `<tr><td>${r.runway_id}</td><td>${r.length.toLocaleString()}' </td><td>${r.surface}</td></tr>`).join('')}</tbody>
-                        </table>` : '<p>No runway data</p>'}
-                    </div>
+            const apt    = data.airport;
+            const fltcat = (data.metar?.fltcat || 'vfr').toLowerCase();
+            html += `<div class="apt-card">
+                <h3>${icao} <span class="fltcat ${fltcat}">${fltcat.toUpperCase()}</span></h3>
+                <div class="apt-name">${apt.name} — ${apt.city}, ${apt.state}</div>
+                <div class="apt-grid">
+                  <div>
+                    <div class="apt-info-row"><span class="lbl">Elevation</span><span class="val">${apt.elevation}' MSL</span></div>
+                    <div class="apt-info-row"><span class="lbl">Lat / Lon</span><span class="val">${apt.latitude.toFixed(3)}° / ${apt.longitude.toFixed(3)}°</span></div>
+                    <div class="metar-raw">${data.metar?.rawOb || 'No METAR available'}</div>
+                  </div>
+                  <div>
+                    ${data.runways.length ? `<table class="rwy-table">
+                      <thead><tr><th>Runway</th><th>Length</th><th>Surface</th></tr></thead>
+                      <tbody>${data.runways.map(r => `<tr><td>${r.runway_id}</td><td>${r.length.toLocaleString()}'</td><td>${r.surface}</td></tr>`).join('')}</tbody>
+                    </table>` : '<p style="color:var(--text-dim);font-size:0.75rem">No runway data</p>'}
+                  </div>
                 </div>
-                ${data.diagram_url ? `<div class="diagram-container">
-                    <h4 style="color:var(--navy); font-size:0.85rem; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:0.5rem;">Airport Diagram</h4>
-                    <iframe src="${data.diagram_url}" title="${icao} Airport Diagram"></iframe>
-                    <a href="${data.diagram_url}" target="_blank" class="diagram-link">Open diagram in new tab ↗</a>
-                </div>` : '<p style="color:var(--text-dim); margin-top:1rem; font-size:0.85rem;">No airport diagram available</p>'}
             </div>`;
-        } catch (e) {
-            console.error(`Failed to fetch details for ${icao}:`, e);
-        }
+        } catch {}
     }
-
-    container.innerHTML = html || '<p>No airport data available</p>';
+    const el = document.getElementById('apt-content');
+    el.innerHTML = html || '<p style="color:var(--text-dim);padding:1rem">No airport data available</p>';
+    document.getElementById('apt-empty').style.display  = 'none';
+    el.style.display = 'block';
 }
 
-// Terrain Profile
-let terrainData = null;
-
+// ── Terrain profile ────────────────────────────────────────────
 async function fetchTerrainProfile() {
-    if (!currentRoute || !currentRoute.route_points) return;
+    if (!currentRoute?.route_points) return;
+    const res  = await fetch('/api/terrain-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            route_points:    currentRoute.route_points.map(p => ({ lat: p.latitude || p.lat, lon: p.longitude || p.lon, identifier: p.identifier })),
+            cruise_altitude: currentRoute.cruise?.altitude || 6000
+        })
+    });
+    const data = await res.json();
+    if (!data.success) return;
+    terrainData = data;
 
-    const profileContent = document.getElementById('profile-content');
-    const noProfile = document.getElementById('no-profile');
+    document.getElementById('trn-max').textContent = data.max_terrain.toLocaleString();
+    document.getElementById('trn-clr').textContent = data.min_clearance.toLocaleString();
 
-    // Show loading state
-    noProfile.innerHTML = '<div class="profile-loading"><span class="spinner"></span> Fetching terrain data along route...</div>';
-    noProfile.style.display = 'block';
-    profileContent.style.display = 'none';
+    const badge = document.getElementById('trn-status-badge');
+    if      (data.min_clearance >= 2000) { badge.textContent = 'ADEQUATE';    badge.className = 'ok';     }
+    else if (data.min_clearance >= 1000) { badge.textContent = 'MIN VFR CLR'; badge.className = 'warn';   }
+    else                                 { badge.textContent = 'INSUFFICIENT'; badge.className = 'danger'; }
 
-    try {
-        const res = await fetch('/api/terrain-profile', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                route_points: currentRoute.route_points.map(p => ({
-                    lat: p.latitude || p.lat,
-                    lon: p.longitude || p.lon,
-                    identifier: p.identifier
-                })),
-                cruise_altitude: currentRoute.cruise?.altitude || 6000
-            })
-        });
+    document.getElementById('trn-empty').style.display   = 'none';
+    document.getElementById('trn-content').style.display = 'block';
 
-        const data = await res.json();
-        if (!data.success) {
-            noProfile.innerHTML = '<p>Failed to fetch terrain data: ' + (data.error || 'Unknown error') + '</p>';
-            return;
-        }
-
-        terrainData = data;
-
-        // Update stats
-        document.getElementById('profile-max-terrain').textContent = data.max_terrain.toLocaleString();
-        document.getElementById('profile-min-clearance').textContent = data.min_clearance.toLocaleString();
-        document.getElementById('profile-climb-dist').textContent = data.climb_distance || '--';
-        document.getElementById('profile-desc-dist').textContent = data.descent_distance || '--';
-
-        const statusEl = document.getElementById('profile-clearance-status');
-        if (data.min_clearance >= 2000) {
-            statusEl.textContent = 'ADEQUATE CLEARANCE';
-            statusEl.className = 'profile-clearance ok';
-        } else if (data.min_clearance >= 1000) {
-            statusEl.textContent = 'MINIMUM VFR CLEARANCE';
-            statusEl.className = 'profile-clearance warning';
-        } else {
-            statusEl.textContent = 'INSUFFICIENT CLEARANCE';
-            statusEl.className = 'profile-clearance danger';
-        }
-
-        noProfile.style.display = 'none';
-        profileContent.style.display = 'block';
-
+    if (document.getElementById('pane-terrain').classList.contains('active'))
         drawTerrainProfile();
-    } catch (e) {
-        noProfile.innerHTML = '<p>Error fetching terrain data: ' + e.message + '</p>';
-    }
 }
 
 function drawTerrainProfile() {
     if (!terrainData) return;
-
-    const canvas = document.getElementById('terrain-canvas');
+    const canvas    = document.getElementById('terrain-canvas');
     const container = canvas.parentElement;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr       = window.devicePixelRatio || 1;
+    const rect      = container.getBoundingClientRect();
+    const W         = rect.width - 24;
+    const H         = 150;
 
-    // Size canvas to container
-    const rect = container.getBoundingClientRect();
-    const width = rect.width - 32; // account for padding
-    const height = 350;
-
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    canvas.style.width = width + 'px';
-    canvas.style.height = height + 'px';
+    canvas.width  = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
 
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
 
-    const profile = terrainData.profile;
-    const cruiseAlt = terrainData.cruise_altitude;
-    const totalDist = terrainData.total_distance;
+    const { profile, cruise_altitude: cruiseAlt, total_distance: totalDist, max_terrain: maxTerrain } = terrainData;
+    const yMax = Math.max(cruiseAlt + 800, maxTerrain + 1500);
+    const mg   = { top: 18, right: 10, bottom: 28, left: 42 };
+    const cW   = W - mg.left - mg.right;
+    const cH   = H - mg.top  - mg.bottom;
 
-    // Chart margins
-    const margin = { top: 30, right: 20, bottom: 45, left: 55 };
-    const chartW = width - margin.left - margin.right;
-    const chartH = height - margin.top - margin.bottom;
+    const xS = d => mg.left + (d / totalDist) * cW;
+    const yS = a => mg.top  + cH - (a / yMax) * cH;
 
-    // Y-axis range: 0 to max(cruise alt + 1000, max terrain + 2000)
-    const maxTerrain = terrainData.max_terrain;
-    const yMax = Math.max(cruiseAlt + 1000, maxTerrain + 2000);
-    const yMin = 0;
-
-    // Scale functions
-    const xScale = (dist) => margin.left + (dist / totalDist) * chartW;
-    const yScale = (alt) => margin.top + chartH - ((alt - yMin) / (yMax - yMin)) * chartH;
-
-    // Clear
     ctx.fillStyle = '#0a1628';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, W, H);
 
-    // Grid lines
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    // Y grid
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
     ctx.lineWidth = 1;
-
-    // Y grid (every 1000 or 2000 ft depending on range)
     const yStep = yMax > 10000 ? 2000 : 1000;
+    ctx.fillStyle = 'rgba(255,255,255,0.3)';
+    ctx.font = '9px JetBrains Mono, monospace';
     for (let alt = 0; alt <= yMax; alt += yStep) {
-        const y = yScale(alt);
-        ctx.beginPath();
-        ctx.moveTo(margin.left, y);
-        ctx.lineTo(width - margin.right, y);
-        ctx.stroke();
-
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        ctx.font = '11px JetBrains Mono, monospace';
+        const y = yS(alt);
+        ctx.beginPath(); ctx.moveTo(mg.left, y); ctx.lineTo(W - mg.right, y); ctx.stroke();
         ctx.textAlign = 'right';
-        ctx.fillText(alt.toLocaleString() + "'", margin.left - 8, y + 4);
+        ctx.fillText(alt >= 1000 ? (alt/1000).toFixed(0) + 'k' : alt, mg.left - 4, y + 3);
     }
-
-    // X grid (every 10 NM or appropriate interval)
-    const xStep = totalDist > 100 ? 20 : (totalDist > 50 ? 10 : 5);
-    for (let dist = 0; dist <= totalDist; dist += xStep) {
-        const x = xScale(dist);
-        ctx.beginPath();
-        ctx.moveTo(x, margin.top);
-        ctx.lineTo(x, height - margin.bottom);
-        ctx.stroke();
-
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
-        ctx.font = '11px JetBrains Mono, monospace';
-        ctx.textAlign = 'center';
-        ctx.fillText(dist + ' NM', x, height - margin.bottom + 18);
-    }
-
-    // 1000' AGL below flight path (dashed orange)
-    ctx.save();
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = 'rgba(255,165,0,0.5)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    for (let i = 0; i < profile.length; i++) {
-        const x = xScale(profile[i].dist_nm);
-        const flightAlt = profile[i].flight_alt || cruiseAlt;
-        const y = yScale(flightAlt - 1000);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    ctx.restore();
 
     // Terrain fill
+    const grad = ctx.createLinearGradient(0, yS(maxTerrain), 0, yS(0));
+    grad.addColorStop(0, '#4a7a49'); grad.addColorStop(1, '#1e3a1e');
     ctx.beginPath();
-    ctx.moveTo(xScale(profile[0].dist_nm), yScale(0));
-    for (let i = 0; i < profile.length; i++) {
-        ctx.lineTo(xScale(profile[i].dist_nm), yScale(profile[i].elevation_ft));
-    }
-    ctx.lineTo(xScale(profile[profile.length - 1].dist_nm), yScale(0));
+    ctx.moveTo(xS(profile[0].dist_nm), yS(0));
+    for (const pt of profile) ctx.lineTo(xS(pt.dist_nm), yS(pt.elevation_ft));
+    ctx.lineTo(xS(profile[profile.length-1].dist_nm), yS(0));
     ctx.closePath();
-
-    // Terrain gradient
-    const terrainGrad = ctx.createLinearGradient(0, yScale(maxTerrain), 0, yScale(0));
-    terrainGrad.addColorStop(0, '#5b8c5a');
-    terrainGrad.addColorStop(0.5, '#3d6b3d');
-    terrainGrad.addColorStop(1, '#2a4a2a');
-    ctx.fillStyle = terrainGrad;
+    ctx.fillStyle = grad;
     ctx.fill();
 
     // Terrain outline
     ctx.beginPath();
     for (let i = 0; i < profile.length; i++) {
-        const x = xScale(profile[i].dist_nm);
-        const y = yScale(profile[i].elevation_ft);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        const x = xS(profile[i].dist_nm), y = yS(profile[i].elevation_ft);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = '#7ec87e';
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
+    ctx.strokeStyle = '#7ec87e'; ctx.lineWidth = 1; ctx.stroke();
 
-    // Flight path line (red, shows climb/cruise/descent)
+    // Flight path
     ctx.beginPath();
     for (let i = 0; i < profile.length; i++) {
-        const x = xScale(profile[i].dist_nm);
-        const flightAlt = profile[i].flight_alt || cruiseAlt;
-        const y = yScale(flightAlt);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        const x = xS(profile[i].dist_nm), y = yS(profile[i].flight_alt ?? cruiseAlt);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     }
-    ctx.strokeStyle = '#bf0a30';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
+    ctx.strokeStyle = '#bf0a30'; ctx.lineWidth = 2; ctx.stroke();
 
-    // Cruise altitude reference line (thin dashed white)
-    ctx.save();
-    ctx.setLineDash([4, 6]);
-    ctx.beginPath();
-    ctx.moveTo(margin.left, yScale(cruiseAlt));
-    ctx.lineTo(width - margin.right, yScale(cruiseAlt));
-    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    // Cruise reference line
+    ctx.save(); ctx.setLineDash([4,5]);
+    ctx.beginPath(); ctx.moveTo(mg.left, yS(cruiseAlt)); ctx.lineTo(W - mg.right, yS(cruiseAlt));
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; ctx.stroke();
     ctx.restore();
 
-    // Flight path labels
-    ctx.font = 'bold 11px JetBrains Mono, monospace';
+    // Cruise label
+    ctx.fillStyle = 'rgba(191,10,48,0.9)'; ctx.font = '9px JetBrains Mono, monospace';
     ctx.textAlign = 'left';
+    ctx.fillText(cruiseAlt.toLocaleString() + "'", mg.left + 3, yS(cruiseAlt) - 4);
 
-    // Cruise alt label
-    ctx.fillStyle = '#bf0a30';
-    ctx.fillText(cruiseAlt.toLocaleString() + "' MSL", margin.left + 5, yScale(cruiseAlt) - 6);
-
-    // Top of Descent marker
-    const todDist = terrainData.top_of_descent;
-    const descDist = terrainData.descent_distance;
-    const climbDist = terrainData.climb_distance;
-    if (todDist > 0 && descDist > 2) {
-        const todX = xScale(todDist);
-        ctx.save();
-        ctx.setLineDash([2, 3]);
-        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(todX, yScale(cruiseAlt));
-        ctx.lineTo(todX, height - margin.bottom);
-        ctx.stroke();
-        ctx.restore();
-
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.font = '10px IBM Plex Sans, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('T/D', todX, yScale(cruiseAlt) + 14);
-    }
-
-    // Top of Climb marker
-    if (climbDist > 2) {
-        const tocX = xScale(climbDist);
-        ctx.save();
-        ctx.setLineDash([2, 3]);
-        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(tocX, yScale(cruiseAlt));
-        ctx.lineTo(tocX, height - margin.bottom);
-        ctx.stroke();
-        ctx.restore();
-
-        ctx.fillStyle = 'rgba(255,255,255,0.5)';
-        ctx.font = '10px IBM Plex Sans, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('T/C', tocX, yScale(cruiseAlt) + 14);
-    }
-
-    // Waypoint markers
-    for (const pt of profile) {
-        if (pt.waypoint) {
-            const x = xScale(pt.dist_nm);
-            ctx.beginPath();
-            ctx.moveTo(x, margin.top);
-            ctx.lineTo(x, height - margin.bottom);
-            ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-            ctx.lineWidth = 1;
-            ctx.setLineDash([3, 3]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-
-            // Waypoint label at top
-            ctx.fillStyle = '#ffd700';
-            ctx.font = 'bold 11px IBM Plex Sans, sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText(pt.waypoint, x, margin.top - 8);
-
-            // Small diamond marker on terrain
-            const terrainY = yScale(pt.elevation_ft);
-            ctx.fillStyle = '#ffd700';
-            ctx.beginPath();
-            ctx.moveTo(x, terrainY - 5);
-            ctx.lineTo(x + 4, terrainY);
-            ctx.lineTo(x, terrainY + 5);
-            ctx.lineTo(x - 4, terrainY);
-            ctx.closePath();
-            ctx.fill();
-        }
-    }
-
-    // Axis labels
-    ctx.fillStyle = 'rgba(255,255,255,0.5)';
-    ctx.font = '11px IBM Plex Sans, sans-serif';
+    // X distance labels
+    const xStep = totalDist > 100 ? 20 : totalDist > 50 ? 10 : 5;
+    ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.font = '9px JetBrains Mono, monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('Distance (NM)', margin.left + chartW / 2, height - 5);
+    for (let d = 0; d <= totalDist; d += xStep)
+        ctx.fillText(d, xS(d), H - mg.bottom + 14);
 
-    ctx.save();
-    ctx.translate(14, margin.top + chartH / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.fillText('Altitude (ft MSL)', 0, 0);
-    ctx.restore();
+    // Waypoint markers on profile
+    for (const pt of profile) {
+        if (!pt.waypoint) continue;
+        const x = xS(pt.dist_nm);
+        ctx.save(); ctx.setLineDash([2,3]);
+        ctx.beginPath(); ctx.moveTo(x, mg.top); ctx.lineTo(x, H - mg.bottom);
+        ctx.strokeStyle = 'rgba(255,215,0,0.4)'; ctx.lineWidth = 1; ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = '#ffd700'; ctx.font = 'bold 9px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(pt.waypoint, x, mg.top - 3);
+    }
 
-    // Mouse hover interaction
-    canvas.onmousemove = (e) => {
-        const canvasRect = canvas.getBoundingClientRect();
-        const mouseX = e.clientX - canvasRect.left;
-        const dist = ((mouseX - margin.left) / chartW) * totalDist;
-
-        if (dist < 0 || dist > totalDist) {
-            document.getElementById('profile-hover-info').textContent = '';
-            return;
-        }
-
-        // Find nearest profile point
-        let nearest = profile[0];
-        let minDiff = Infinity;
-        for (const pt of profile) {
-            const diff = Math.abs(pt.dist_nm - dist);
-            if (diff < minDiff) { minDiff = diff; nearest = pt; }
-        }
-
-        const flightAlt = nearest.flight_alt || cruiseAlt;
-        const clearance = flightAlt - nearest.elevation_ft;
-        let phase = 'Cruise';
-        if (nearest.dist_nm <= (terrainData.climb_distance || 0)) phase = 'Climb';
-        else if (nearest.dist_nm >= (terrainData.top_of_descent || totalDist)) phase = 'Descent';
-        document.getElementById('profile-hover-info').textContent =
-            `${phase}  |  Dist: ${nearest.dist_nm} NM  |  Alt: ${flightAlt.toLocaleString()}'  |  Terrain: ${nearest.elevation_ft.toLocaleString()}'  |  Clearance: ${clearance.toLocaleString()}' AGL` +
-            (nearest.waypoint ? `  |  ${nearest.waypoint}` : '');
+    // Hover
+    canvas.onmousemove = e => {
+        const r    = canvas.getBoundingClientRect();
+        const dist = ((e.clientX - r.left - mg.left) / cW) * totalDist;
+        if (dist < 0 || dist > totalDist) { document.getElementById('trn-hover').textContent = ''; return; }
+        let nearest = profile[0], minD = Infinity;
+        for (const pt of profile) { const d = Math.abs(pt.dist_nm - dist); if (d < minD) { minD = d; nearest = pt; } }
+        const fAlt = nearest.flight_alt ?? cruiseAlt;
+        document.getElementById('trn-hover').textContent =
+            `${nearest.dist_nm} NM | Alt: ${fAlt.toLocaleString()}' | Terrain: ${nearest.elevation_ft.toLocaleString()}' | Clearance: ${(fAlt - nearest.elevation_ft).toLocaleString()}' AGL`;
     };
-
-    canvas.onmouseleave = () => {
-        document.getElementById('profile-hover-info').textContent = '';
-    };
+    canvas.onmouseleave = () => { document.getElementById('trn-hover').textContent = ''; };
 }
 
-// Redraw on window resize
-window.addEventListener('resize', () => {
-    if (terrainData) drawTerrainProfile();
+window.addEventListener('resize', () => { if (terrainData) drawTerrainProfile(); });
+
+// ── Performance ────────────────────────────────────────────────
+document.getElementById('calc-takeoff').addEventListener('click', async () => {
+    try {
+        const res = await fetch('/api/performance/takeoff', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                weight:            document.getElementById('to-weight').value,
+                pressure_altitude: document.getElementById('to-altitude').value,
+                temperature:       document.getElementById('to-temp').value,
+                headwind:          document.getElementById('to-wind').value
+            })
+        });
+        const r = await res.json();
+        document.getElementById('to-ground-roll').textContent = r.ground_roll;
+        document.getElementById('to-total').textContent       = r.total_over_50ft;
+        document.getElementById('takeoff-results').style.display = 'block';
+    } catch (e) { alert(e.message); }
 });
 
-// Start by checking startup status
-document.addEventListener('DOMContentLoaded', checkStartupStatus);
+document.getElementById('calc-landing').addEventListener('click', async () => {
+    try {
+        const res = await fetch('/api/performance/landing', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                pressure_altitude: document.getElementById('land-altitude').value,
+                temperature:       document.getElementById('land-temp').value,
+                headwind:          document.getElementById('land-wind').value
+            })
+        });
+        const r = await res.json();
+        document.getElementById('land-ground-roll').textContent = r.ground_roll;
+        document.getElementById('land-total').textContent       = r.total_over_50ft;
+        document.getElementById('landing-results').style.display = 'block';
+    } catch (e) { alert(e.message); }
+});
+
+// ── Weight & Balance ───────────────────────────────────────────
+document.getElementById('calc-wb').addEventListener('click', async () => {
+    try {
+        const res = await fetch('/api/weight-balance', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                empty_weight:            document.getElementById('wb-empty-weight').value,
+                empty_moment:            document.getElementById('wb-empty-moment').value,
+                pilot_weight:            document.getElementById('wb-pilot').value,
+                front_passenger_weight:  document.getElementById('wb-front-pax').value,
+                rear_passenger_weight:   document.getElementById('wb-rear-pax').value,
+                baggage_weight:          document.getElementById('wb-baggage').value,
+                fuel_gallons:            document.getElementById('wb-fuel').value
+            })
+        });
+        const r = await res.json();
+        document.getElementById('wb-total-weight').textContent = r.total_weight;
+        document.getElementById('wb-cg').textContent           = r.cg;
+        document.getElementById('wb-moment').textContent       = r.moment_1000;
+
+        const msg = document.getElementById('wb-status-msg');
+        if (r.within_all_limits) {
+            msg.className = 'ok';
+            msg.textContent = '✓ Within all limits';
+        } else {
+            msg.className = 'danger';
+            msg.textContent = (!r.within_weight_limits ? `OVERWEIGHT by ${Math.abs(r.weight_margin)} lbs ` : '') +
+                              (!r.within_cg_limits     ? 'CG OUT OF LIMITS' : '');
+        }
+        document.getElementById('wb-results').style.display = 'block';
+    } catch (e) { alert(e.message); }
+});
