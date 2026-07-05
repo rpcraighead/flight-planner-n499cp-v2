@@ -114,6 +114,23 @@ body {
 }
 #calc-btn:hover { background: #9a0826; }
 
+#guide-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  color: var(--text);
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+#guide-link:hover { background: rgba(191,10,48,0.15); color: #fff; }
+
 #toolbar-right {
   margin-left: auto;
   display: flex;
