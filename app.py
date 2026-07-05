@@ -9,10 +9,16 @@ from io import StringIO
 import threading
 import time
 
+try:
+    from pygeomag import GeoMag
+    _geomag = GeoMag()
+except Exception:
+    _geomag = None  # headings fall back to true (mag_var = 0)
+
 app = Flask(__name__)
 
 DATABASE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'aviation_data.db')
-CHARTS_DIR = 'charts'
+CHARTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'charts')
 AVIATION_WEATHER_BASE = 'https://aviationweather.gov/api/data'
 
 # FAA official tile sources via ArcGIS
@@ -41,7 +47,11 @@ AIRCRAFT_DATABASE = {
         'empty_weight': 1642, 'empty_weight_moment': 62.6,
         'max_takeoff_weight': 2550, 'usable_fuel': 53,
         'fuel_weight_per_gallon': 6.0,
-        'cg_forward_limit': 35.0, 'cg_aft_limit': 47.3,
+        # POH Section 6: forward CG limit slopes aft with weight; aft limit constant
+        'cg_fwd_points': ((1950, 35.0), (2550, 41.0)),
+        'cg_aft_limit': 47.3,
+        'arms': {'front_seats': 37.0, 'rear_seats': 73.0, 'baggage1': 95.0},
+        'baggage1_max': 120,
         'fuel_arm': 48.0, 'taxi_fuel': 1.4,
         
         'cruise_performance': {
@@ -401,12 +411,24 @@ def bearing(lat1, lon1, lat2, lon2):
     y = math.cos(la1)*math.sin(la2) - math.sin(la1)*math.cos(la2)*math.cos(dlo)
     return (math.degrees(math.atan2(x,y))+360)%360
 
+def mag_var(lat, lon):
+    """Magnetic declination in degrees (east positive) from the WMM."""
+    if _geomag is None:
+        return 0.0
+    try:
+        t = get_utc_now()
+        year = t.year + (t.timetuple().tm_yday - 1) / 365.25
+        return _geomag.calculate(glat=lat, glon=lon, alt=0, time=year).d
+    except Exception:
+        return 0.0
+
 def wind_corr(tc, tas, wd, ws):
     if ws == 0: return 0, tas
     swc = (ws/tas)*math.sin(math.radians(wd-tc))
     swc = max(-1, min(1, swc))
     wca = math.degrees(math.asin(swc))
-    gs = tas*math.cos(math.asin(swc)) + ws*math.cos(math.radians(wd-tc))
+    # Winds-aloft direction is FROM: a headwind (wd == tc) must reduce GS
+    gs = tas*math.cos(math.asin(swc)) - ws*math.cos(math.radians(wd-tc))
     return round(wca,1), max(round(gs,1), 0)
 
 def get_airport(icao):
@@ -436,6 +458,17 @@ def get_navaid(nid):
     return None
 
 def get_coords(ident):
+    # User-dropped waypoint: "@lat,lon" (from the map rubber-band "user waypoint" option)
+    if ident.startswith('@'):
+        try:
+            lat_s, lon_s = ident[1:].split(',')
+            lat, lon = float(lat_s), float(lon_s)
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return (lat, lon, 'user', {'identifier': 'USR', 'user': True,
+                                           'latitude': lat, 'longitude': lon})
+        except Exception:
+            return None
+        return None
     a = get_airport(ident)
     if a: return (a['latitude'], a['longitude'], 'airport', a)
     n = get_navaid(ident)
@@ -545,11 +578,16 @@ def nearest_airport():
     c = conn.cursor()
     results = []
 
+    # ORDER BY approximate squared distance so LIMIT keeps the closest rows
+    # (PK order could drop the true nearest fix in dense areas like SoCal)
+    cos2 = cos_lat * cos_lat
     c.execute('''SELECT icao, name, city, latitude, longitude, elevation
                  FROM airports
                  WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-                 LIMIT 100''',
-              (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta))
+                 ORDER BY (latitude-?)*(latitude-?) + (longitude-?)*(longitude-?)*?
+                 LIMIT 300''',
+              (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta,
+               lat, lat, lon, lon, cos2))
     for row in c.fetchall():
         d = gc_dist(lat, lon, row[3], row[4])
         if d <= radius_nm:
@@ -559,8 +597,10 @@ def nearest_airport():
     c.execute('''SELECT id, name, type, latitude, longitude
                  FROM navaids
                  WHERE latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-                 LIMIT 50''',
-              (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta))
+                 ORDER BY (latitude-?)*(latitude-?) + (longitude-?)*(longitude-?)*?
+                 LIMIT 150''',
+              (lat - lat_delta, lat + lat_delta, lon - lon_delta, lon + lon_delta,
+               lat, lat, lon, lon, cos2))
     for row in c.fetchall():
         d = gc_dist(lat, lon, row[3], row[4])
         if d <= radius_nm:
@@ -593,10 +633,16 @@ def calc_route():
     pts = [dep] + wpts + [dest]
     
     coords = []
+    user_n = 0
     for p in pts:
         c = get_coords(p)
         if not c: return jsonify({'success': False, 'error': f'Not found: {p}'})
-        coords.append({'identifier': p, 'lat': c[0], 'lon': c[1], 'type': c[2], 'data': c[3]})
+        if c[2] == 'user':
+            user_n += 1
+            label = f'USR{user_n}'
+        else:
+            label = p
+        coords.append({'identifier': label, 'lat': c[0], 'lon': c[1], 'type': c[2], 'data': c[3]})
     
     cruise = get_cruise(alt, rpm)
     mid = coords[len(coords)//2]
@@ -617,13 +663,16 @@ def calc_route():
         dist = gc_dist(fr['lat'], fr['lon'], to['lat'], to['lon'])
         tc = bearing(fr['lat'], fr['lon'], to['lat'], to['lon'])
         wca, gs = wind_corr(tc, cruise['true_airspeed'], wdir, wspd)
-        mh = (tc + wca) % 360
+        # MH = TH - variation (east positive: "east is least")
+        var = mag_var((fr['lat'] + to['lat']) / 2, (fr['lon'] + to['lon']) / 2)
+        mh = (tc + wca - var) % 360
         lt = (dist/gs)*60 if gs > 0 else 0
         lf = (lt/60) * cruise['fuel_flow_gph']
-        
+
         segs.append({'from': fr['identifier'], 'to': to['identifier'],
             'distance_nm': round(dist,1), 'true_course': round(tc,0),
             'wind_correction': round(wca,0), 'magnetic_heading': round(mh,0),
+            'mag_var': round(var,1),
             'ground_speed': round(gs,0), 'time_minutes': round(lt,0), 'fuel_gallons': round(lf,1)})
         tot_dist += dist; tot_time += lt; tot_fuel += lf
     
@@ -692,22 +741,40 @@ def perf_land():
 def wb():
     d = request.json
     ac = AIRCRAFT_DATABASE[DEFAULT_AIRCRAFT]
+    arms = ac['arms']
     ew = float(d.get('empty_weight', ac['empty_weight']))
     em = float(d.get('empty_moment', ac['empty_weight_moment']))
     p, f, r, b, fu = float(d.get('pilot_weight',0)), float(d.get('front_passenger_weight',0)), float(d.get('rear_passenger_weight',0)), float(d.get('baggage_weight',0)), float(d.get('fuel_gallons',0))
-    
+
+    warnings = []
+    if fu > ac['usable_fuel']:
+        warnings.append(f"Fuel exceeds usable capacity ({ac['usable_fuel']} gal)")
+    if b > ac['baggage1_max']:
+        warnings.append(f"Baggage exceeds {ac['baggage1_max']} lb limit")
+
     fw = fu * ac['fuel_weight_per_gallon']
     tw = ew + p + f + r + b + fw
-    tm = em*1000 + p*40 + f*40 + r*73 + b*95 + fw*48
+    tm = (em*1000 + (p + f)*arms['front_seats'] + r*arms['rear_seats']
+          + b*arms['baggage1'] + fw*ac['fuel_arm'])
     cg = tm/tw if tw > 0 else 0
-    
+
+    # Forward CG limit varies with weight (linear between POH envelope points)
+    (w1, f1), (w2, f2) = ac['cg_fwd_points']
+    if tw <= w1:   fwd_limit = f1
+    elif tw >= w2: fwd_limit = f2
+    else:          fwd_limit = f1 + (tw - w1) / (w2 - w1) * (f2 - f1)
+
+    within_weight = tw <= ac['max_takeoff_weight']
+    within_cg = fwd_limit <= cg <= ac['cg_aft_limit']
+
     return jsonify({
         'total_weight': round(tw,1), 'max_weight': ac['max_takeoff_weight'],
         'weight_margin': round(ac['max_takeoff_weight']-tw,1),
-        'cg': round(cg,2), 'cg_forward_limit': ac['cg_forward_limit'], 'cg_aft_limit': ac['cg_aft_limit'],
-        'within_weight_limits': tw <= ac['max_takeoff_weight'],
-        'within_cg_limits': ac['cg_forward_limit'] <= cg <= ac['cg_aft_limit'],
-        'within_all_limits': tw <= ac['max_takeoff_weight'] and ac['cg_forward_limit'] <= cg <= ac['cg_aft_limit'],
+        'cg': round(cg,2), 'cg_forward_limit': round(fwd_limit,2), 'cg_aft_limit': ac['cg_aft_limit'],
+        'within_weight_limits': within_weight,
+        'within_cg_limits': within_cg,
+        'within_all_limits': within_weight and within_cg and not warnings,
+        'warnings': warnings,
         'moment_1000': round(tm/1000,1)
     })
 

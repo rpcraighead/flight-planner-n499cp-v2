@@ -1,3 +1,5 @@
+
+
 // ── State ──────────────────────────────────────────────────────
 let map = null;
 let routeLayer = null;
@@ -370,13 +372,29 @@ function snapScore(r) {
     if (w) return r.distance_nm * w;
     return r.distance_nm * (/^K[A-Z]{3}$/.test(r.ident) ? 0.80 : 1.30);
 }
-async function snapToNearest(lat, lon) {
+async function snapCandidates(lat, lon, n = 3) {
     try {
         const res  = await fetch(`/api/nearest-airport?lat=${lat}&lon=${lon}&radius_nm=25`);
         const data = await res.json();
-        if (!data.found || !data.nearest.length) return null;
-        return [...data.nearest].sort((a, b) => snapScore(a) - snapScore(b))[0].ident;
-    } catch { return null; }
+        if (!data.found || !data.nearest.length) return [];
+        const sorted = [...data.nearest].sort((a, b) => snapScore(a) - snapScore(b));
+        const seen = new Set(), out = [];
+        for (const c of sorted) {
+            if (seen.has(c.ident)) continue;
+            seen.add(c.ident);
+            out.push(c);
+            if (out.length >= n) break;
+        }
+        return out;
+    } catch { return []; }
+}
+
+function rbCandidateBtns(cands, onclickFor) {
+    if (!cands.length) return `<div class="rb-nofix">No fix within 25 NM</div>`;
+    return cands.map(c => {
+        const kind = c.type === 'airport' ? '' : ` <span class="rb-type">${c.type}</span>`;
+        return `<button class="rb-opt rb-snap" onclick="${onclickFor(c)}">⌖ <b>${c.ident}</b>${kind}<span>${c.name} · ${c.distance_nm} NM</span></button>`;
+    }).join('');
 }
 
 function insertWptAtIndex(ident, segIdx) {
@@ -385,6 +403,42 @@ function insertWptAtIndex(ident, segIdx) {
     parsed.waypoints.splice(segIdx, 0, ident);
     input.value = buildRoute(parsed.departure, parsed.waypoints, parsed.destination);
 }
+
+// Rubber-band drop choice (snap-to-fix vs user waypoint)
+let rbChosen = false;
+window.rbInsert = function(segIdx, token) {
+    rbChosen = true;
+    map.closePopup();
+    insertWptAtIndex(token, segIdx);
+    calculateRoute(false);
+};
+
+// Replace an existing route point (from waypoint-marker drag)
+window.rbReplace = function(ptIdx, token) {
+    rbChosen = true;
+    map.closePopup();
+    const input  = document.getElementById('route-input');
+    const parsed = parseRoute(input.value);
+    if (!parsed || !currentRoute) return;
+    const last = currentRoute.route_points.length - 1;
+    if      (ptIdx === 0)    parsed.departure   = token;
+    else if (ptIdx === last) parsed.destination = token;
+    else                     parsed.waypoints[ptIdx - 1] = token;
+    input.value = buildRoute(parsed.departure, parsed.waypoints, parsed.destination);
+    calculateRoute(false);
+};
+
+// Remove an intermediate waypoint (from waypoint-marker click)
+window.rbRemove = function(ptIdx) {
+    rbChosen = true;
+    map.closePopup();
+    const input  = document.getElementById('route-input');
+    const parsed = parseRoute(input.value);
+    if (!parsed) return;
+    parsed.waypoints.splice(ptIdx - 1, 1);
+    input.value = buildRoute(parsed.departure, parsed.waypoints, parsed.destination);
+    calculateRoute(false);
+};
 
 // ── Route calculation ──────────────────────────────────────────
 async function calculateRoute(alertOnError = true) {
@@ -476,8 +530,10 @@ function drawRouteOnMap() {
 
     // Rubber-band midpoint handles
     for (let i = 0; i < lls.length - 1; i++) {
-        const midLat = (lls[i][0] + lls[i+1][0]) / 2;
-        const midLng = (lls[i][1] + lls[i+1][1]) / 2;
+        const segIdx = i;
+        const segA = lls[i], segB = lls[i + 1];
+        const midLat = (segA[0] + segB[0]) / 2;
+        const midLng = (segA[1] + segB[1]) / 2;
         const handle = L.marker([midLat, midLng], {
             icon: L.divIcon({
                 className: 'rb-handle-icon',
@@ -486,13 +542,47 @@ function drawRouteOnMap() {
             }),
             draggable: true, zIndexOffset: -200
         });
-        const segIdx = i;
+
+        let preview = null;
+        let snapBusy = false;
+
+        // Live rubber-band: dashed A→handle→B preview + snap candidate tooltip
+        handle.on('dragstart', () => {
+            preview = L.polyline([segA, [midLat, midLng], segB], {
+                color: '#ffd700', weight: 2, dashArray: '6,6', opacity: 0.9
+            }).addTo(layer);
+            handle.bindTooltip('…', {
+                permanent: true, direction: 'top', offset: [0, -10], className: 'rb-snap-tip'
+            }).openTooltip();
+        });
+
+        handle.on('drag', e => {
+            const p = e.target.getLatLng();
+            if (preview) preview.setLatLngs([segA, p, segB]);
+            if (snapBusy) return;
+            snapBusy = true;
+            setTimeout(async () => {
+                const ll = handle.getLatLng();
+                const best = (await snapCandidates(ll.lat, ll.lng, 1))[0];
+                if (handle.getTooltip())
+                    handle.setTooltipContent(best ? `⌖ ${best.ident} · ${best.distance_nm} NM` : 'no fix ≤ 25 NM');
+                snapBusy = false;
+            }, 250);
+        });
+
         handle.on('dragend', async e => {
+            handle.unbindTooltip();
             const { lat, lng } = e.target.getLatLng();
-            const ident = await snapToNearest(lat, lng);
-            if (!ident) { e.target.setLatLng([midLat, midLng]); return; }
-            insertWptAtIndex(ident, segIdx);
-            await calculateRoute(false);
+            const latF = lat.toFixed(4), lngF = lng.toFixed(4);
+            const cands = await snapCandidates(lat, lng, 3);
+            const snapBtns = rbCandidateBtns(cands, c => `rbInsert(${segIdx},'${c.ident}')`);
+            const userBtn = `<button class="rb-opt rb-user" onclick="rbInsert(${segIdx},'@${latF},${lngF}')">📍 User waypoint here<span>${latF}, ${lngF}</span></button>`;
+            rbChosen = false;
+            L.popup({ maxWidth: 260, className: 'rb-choice-popup' })
+                .setLatLng([lat, lng])
+                .setContent(`<div class="rb-popup"><div class="rb-title">Add waypoint</div>${snapBtns}${userBtn}</div>`)
+                .openOn(map)
+                .on('remove', () => { if (!rbChosen) drawRouteOnMap(); });
         });
         handle.addTo(layer);
     }

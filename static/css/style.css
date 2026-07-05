@@ -653,6 +653,37 @@ body {
 }
 .map-popup-btns button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
 
+/* Rubber-band drop choice popup */
+.rb-popup { min-width: 190px; }
+.rb-title {
+  font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--text-dim); margin-bottom: 0.4rem;
+}
+.rb-opt {
+  display: block; width: 100%; text-align: left;
+  margin: 0 0 0.35rem; padding: 0.4rem 0.5rem;
+  border: 1px solid #3a3a3a; background: #1f1f1f; color: var(--text);
+  border-radius: 5px; cursor: pointer; font-size: 0.8rem; line-height: 1.2;
+}
+.rb-opt:last-child { margin-bottom: 0; }
+.rb-opt:hover { border-color: var(--accent); background: #262d3a; }
+.rb-opt span { display: block; font-size: 0.66rem; color: var(--text-dim); margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+.rb-snap b { color: var(--gold); }
+.rb-user:hover { border-color: var(--green); background: #1f2a20; }
+.rb-nofix { font-size: 0.72rem; color: var(--text-dim); padding: 0.2rem 0 0.4rem; }
+.rb-type { font-size: 0.62rem; color: var(--text-dim); font-weight: normal; }
+.rb-hint { font-size: 0.62rem; color: var(--text-dim); margin-top: 0.35rem; font-style: italic; }
+.rb-del:hover { border-color: #d9534f; background: #2a1f1f; }
+
+/* Live snap tooltip shown on the handle while dragging */
+.rb-snap-tip {
+  background: #14181f; border: 1px solid var(--gold); color: var(--gold);
+  font-family: 'JetBrains Mono', monospace; font-size: 0.68rem;
+  padding: 2px 6px; border-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+.rb-snap-tip.leaflet-tooltip-top::before { border-top-color: var(--gold); }
+
 /* ── RUBBER-BAND HANDLES ──────────────────────────────────── */
 .rb-handle-icon { background: transparent; border: none; }
 .rb-dot {
