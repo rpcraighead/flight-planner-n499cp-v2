@@ -44,14 +44,17 @@ document.addEventListener('DOMContentLoaded', async () => {
 function initMap() {
     map = L.map('main-map', { zoomControl: true }).setView([32.82, -117.0], 9);
 
+    // maxNativeZoom = deepest zoom the FAA cache actually has tiles for; beyond it
+    // Leaflet upscales those tiles (blurry but visible) instead of requesting
+    // nonexistent tiles that 404 and render as a black map background.
     tileLayers.vfr = L.tileLayer(tileSources.vfr, {
-        attribution: '© FAA VFR Sectional', maxZoom: 12, minZoom: 5, errorTileUrl: ''
+        attribution: '© FAA VFR Sectional', minZoom: 5, maxNativeZoom: 12, maxZoom: 15
     });
     tileLayers.ifr_low = L.tileLayer(tileSources.ifr_low, {
-        attribution: '© FAA IFR Low Enroute', maxZoom: 12, minZoom: 4, errorTileUrl: ''
+        attribution: '© FAA IFR Low Enroute', minZoom: 4, maxNativeZoom: 10, maxZoom: 15
     });
     tileLayers.ifr_high = L.tileLayer(tileSources.ifr_high || 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/IFR_High/MapServer/tile/{z}/{y}/{x}', {
-        attribution: '© FAA IFR High Enroute', maxZoom: 9, minZoom: 4, errorTileUrl: ''
+        attribution: '© FAA IFR High Enroute', minZoom: 4, maxNativeZoom: 9, maxZoom: 15
     });
     tileLayers.sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
         attribution: '© Esri World Imagery', maxZoom: 18
