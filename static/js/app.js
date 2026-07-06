@@ -654,7 +654,10 @@ async function fetchWeatherBriefing(departure, destination, waypoints) {
 
     let windsHtml = '';
     if (b.winds_aloft?.levels) {
-        windsHtml = `<h5>Winds Aloft</h5><table class="winds-table"><thead><tr><th>ALT</th><th>DIR</th><th>SPD</th><th>TEMP</th></tr></thead><tbody>`;
+        const wsrc = b.winds_aloft.simulated
+            ? '<span style="color:#bf0a30;font-size:0.65rem">(estimated)</span>'
+            : `<span style="color:#7ec87e;font-size:0.65rem">(${b.winds_aloft.station || 'GFS forecast'})</span>`;
+        windsHtml = `<h5>Winds Aloft ${wsrc}</h5><table class="winds-table"><thead><tr><th>ALT</th><th>DIR</th><th>SPD</th><th>TEMP</th></tr></thead><tbody>`;
         for (const [alt, d] of Object.entries(b.winds_aloft.levels))
             windsHtml += `<tr><td>${alt}'</td><td>${d.direction}°</td><td>${d.speed}kt</td><td>${d.temp}°C</td></tr>`;
         windsHtml += '</tbody></table>';

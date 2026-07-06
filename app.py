@@ -30,6 +30,13 @@ DOCS = {
 CHARTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'charts')
 AVIATION_WEATHER_BASE = 'https://aviationweather.gov/api/data'
 
+# Winds/temps aloft: Open-Meteo pressure-level data (GFS), no API key required.
+# Pressure levels bracket the standard FB altitudes (~2.5k–14k ft).
+OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
+WINDS_LEVELS_HPA = [925, 900, 850, 800, 700, 600]
+WINDS_TARGET_ALT = [3000, 6000, 9000, 12000]
+_winds_cache = {}  # (round(lat,1), round(lon,1), 'YYYYMMDDHH') -> winds dict
+
 # FAA official tile sources via ArcGIS
 TILE_SOURCES = {
     'vfr': 'https://tiles.arcgis.com/tiles/ssFJjBXIUyZDrSYZ/arcgis/rest/services/VFR_Sectional/MapServer/tile/{z}/{y}/{x}',
@@ -381,6 +388,73 @@ def simulate_winds(lat, lon):
         }
     }
 
+def _interp_wind(samples, alt):
+    """Linear interpolation of (u, v, temp) by altitude; clamped at the ends.
+    samples: sorted list of (alt_ft, u, v, temp)."""
+    if alt <= samples[0][0]:
+        return samples[0][1:]
+    if alt >= samples[-1][0]:
+        return samples[-1][1:]
+    for i in range(len(samples) - 1):
+        a0, a1 = samples[i][0], samples[i + 1][0]
+        if a0 <= alt <= a1:
+            f = (alt - a0) / (a1 - a0) if a1 != a0 else 0
+            return tuple(samples[i][j] + f * (samples[i + 1][j] - samples[i][j])
+                         for j in (1, 2, 3))
+    return samples[-1][1:]
+
+def fetch_winds_aloft(lat, lon):
+    """Real winds/temps aloft at a point from Open-Meteo (GFS), interpolated to
+    the standard FB altitudes. Falls back to simulate_winds() on any failure so
+    a route still calculates offline."""
+    now = get_utc_now()
+    key = (round(lat, 1), round(lon, 1), now.strftime('%Y%m%d%H'))
+    if key in _winds_cache:
+        return _winds_cache[key]
+    try:
+        fields = []
+        for hpa in WINDS_LEVELS_HPA:
+            fields += [f'windspeed_{hpa}hPa', f'winddirection_{hpa}hPa',
+                       f'temperature_{hpa}hPa', f'geopotential_height_{hpa}hPa']
+        r = requests.get(OPEN_METEO_URL, params={
+            'latitude': lat, 'longitude': lon, 'hourly': ','.join(fields),
+            'wind_speed_unit': 'kn', 'forecast_days': 1, 'timezone': 'UTC',
+        }, timeout=6, headers={'User-Agent': 'N499CP-Planner/1.0'})
+        h = r.json()['hourly']
+        times = h['time']
+        target = now.strftime('%Y-%m-%dT%H:00')
+        idx = times.index(target) if target in times else 0
+
+        # Build (alt_ft, u, v, temp) samples from each pressure level.
+        samples = []
+        for hpa in WINDS_LEVELS_HPA:
+            spd = h[f'windspeed_{hpa}hPa'][idx]
+            drc = h[f'winddirection_{hpa}hPa'][idx]
+            tmp = h[f'temperature_{hpa}hPa'][idx]
+            gh  = h[f'geopotential_height_{hpa}hPa'][idx]
+            if None in (spd, drc, tmp, gh):
+                continue
+            rad = math.radians(drc)                 # direction wind blows FROM
+            samples.append((gh * 3.28084, -spd * math.sin(rad), -spd * math.cos(rad), tmp))
+        if len(samples) < 2:
+            raise ValueError('insufficient pressure levels')
+        samples.sort()
+
+        levels = {}
+        for alt in WINDS_TARGET_ALT:
+            u, v, tmp = _interp_wind(samples, alt)
+            levels[alt] = {
+                'direction': round((math.degrees(math.atan2(-u, -v)) + 360) % 360),
+                'speed': round(math.hypot(u, v)),
+                'temp': round(tmp),
+            }
+        result = {'station': 'GFS (Open-Meteo)', 'simulated': False, 'levels': levels}
+        _winds_cache[key] = result
+        return result
+    except Exception as e:
+        log_msg(f'Winds aloft fetch failed ({e}); using estimate')
+        return simulate_winds(lat, lon)
+
 def fetch_metar(station):
     try:
         r = requests.get(f"{AVIATION_WEATHER_BASE}/metar?ids={station}&format=json", timeout=8,
@@ -690,7 +764,7 @@ def calc_route():
     
     cruise = get_cruise(alt, rpm)
     mid = coords[len(coords)//2]
-    winds = simulate_winds(mid['lat'], mid['lon'])
+    winds = fetch_winds_aloft(mid['lat'], mid['lon'])
     
     wdir, wspd = 0, 0
     if winds and 'levels' in winds:
@@ -727,7 +801,9 @@ def calc_route():
     
     return jsonify({
         'success': True, 'route_points': coords, 'segments': segs,
-        'winds_aloft': {'altitude': alt, 'direction': wdir, 'speed': wspd, 'source': 'estimated'},
+        'winds_aloft': {'altitude': alt, 'direction': wdir, 'speed': wspd,
+                        'source': winds.get('station', 'estimated'),
+                        'simulated': winds.get('simulated', True)},
         'cruise': {'altitude': alt, 'rpm': rpm, 'true_airspeed': cruise['true_airspeed'], 'fuel_flow_gph': cruise['fuel_flow_gph']},
         'climb': climb,
         'totals': {
@@ -762,7 +838,7 @@ def weather_briefing():
         dc, nc = get_coords(dep), get_coords(dest)
         if dc and nc:
             mlat, mlon = (dc[0]+nc[0])/2, (dc[1]+nc[1])/2
-            briefing['winds_aloft'] = simulate_winds(mlat, mlon)
+            briefing['winds_aloft'] = fetch_winds_aloft(mlat, mlon)
         
         briefing['tfrs'] = [{'notam_id': 'INFO', 'type': 'INFO', 'description': 'Check tfr.faa.gov'}]
         
