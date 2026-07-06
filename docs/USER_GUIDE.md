@@ -171,9 +171,11 @@ Loads automatically after a route calc. Shows **METARs**, **TAFs**, **winds
 aloft**, and **NOTAM placeholders** for each airport on the route.
 
 > METARs/TAFs are fetched live from aviationweather.gov when reachable; anything
-> tagged **(sim)** is simulated. **Winds aloft are always simulated** (a
-> deterministic estimate), and NOTAMs are placeholders pointing you to
-> notams.faa.gov. Treat weather here as illustrative.
+> tagged **(sim)** is simulated. **Winds aloft are real** — GFS forecast winds
+> from Open-Meteo at the route midpoint, interpolated to the standard altitudes
+> (tagged with the source; they fall back to a deterministic estimate only if the
+> service is unreachable). NOTAMs are still placeholders pointing you to
+> notams.faa.gov. Always confirm with an official briefing.
 
 ### 5.3 Airports
 
@@ -255,8 +257,8 @@ Valley, and into **Palm Springs (KPSP)** — a nice mountains-to-desert VFR hop.
 
 ### What you should see (illustrative)
 
-Distances and courses are stable; times/fuel/headings depend on the (simulated)
-winds aloft, so your exact numbers may differ slightly.
+Distances and courses are stable; times/fuel/headings depend on the current
+winds aloft (live GFS forecast), so your exact numbers will vary with the weather.
 
 | Leg | Dist (NM) | TC | MH | GS (kt) | Time (min) |
 |-----|-----------|----|----|---------|------------|
@@ -275,7 +277,7 @@ the ~11° E magnetic variation for Southern California being applied correctly.
 
 - **Terrain tab** — the profile will show the high ground east of San Diego and
   around San Jacinto; check the Min Clearance badge against your 9,500 ft cruise.
-- **Weather tab** — METARs for KSEE and KPSP (live if reachable), plus simulated
+- **Weather tab** — METARs for KSEE and KPSP (live if reachable), plus live GFS
   winds aloft.
 - **Airports tab** — runway lengths/surfaces for KSEE and KPSP.
 - **Edit it on the map** — drag the midpoint of the JLI→TRM leg northward and

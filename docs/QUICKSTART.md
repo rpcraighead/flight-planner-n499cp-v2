@@ -43,12 +43,12 @@ The route draws on the map and the **Flight Log** drawer opens at the bottom.
 - **Summary strip:** ~85 NM, ~74 min, ~19 gal, winds.
 - **Nav log table:** per-leg DIST / TC / **MH** / GS / TIME / FUEL. (Magnetic
   headings run ~11° less than true course — that's SoCal magnetic variation.)
-- Exact time/fuel/heading numbers vary with the simulated winds.
+- Exact time/fuel/heading numbers vary with the current winds aloft (live GFS forecast).
 
 ## 6. Look around the tabs
 
 - **Terrain** — profile + Min Clearance badge vs your 9,500 ft cruise.
-- **Weather** — METARs (live if reachable) + simulated winds aloft.
+- **Weather** — METARs (live if reachable) + live GFS winds aloft.
 - **Airports** — runways for KSEE and KPSP.
 
 ## 7. Edit on the map (the fun part)
