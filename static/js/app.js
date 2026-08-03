@@ -38,7 +38,40 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('route-input').addEventListener('keydown', e => {
         if (e.key === 'Enter') calculateRoute(true);
     });
+
+    showDisclaimer();
 });
+
+// ── Startup disclaimer + sample route ──────────────────────────
+// Shown on every load: this is a sim tool, not a real-world planning aid.
+// Acknowledging it drops the user straight into a worked example route.
+function showDisclaimer() {
+    openModal('modal-disclaimer');
+    const ack = document.getElementById('disclaimer-ack');
+    ack.focus();
+    ack.addEventListener('click', () => {
+        closeModal('modal-disclaimer');
+        loadSampleRoute();
+    }, { once: true });
+}
+
+// The airports table can still be downloading on a cold start, which would make
+// the sample route fail with "Not found". Wait for it (briefly) before flying.
+async function loadSampleRoute() {
+    for (let i = 0; i < 30; i++) {
+        try {
+            const res  = await fetch('/api/update-status');
+            const data = await res.json();
+            if (data.airports > 0) break;
+        } catch {}
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    if (await calculateRoute(false)) {
+        // calculateRoute fits the route before the drawer slides open and shrinks
+        // the map, so re-fit once the drawer animation has settled.
+        setTimeout(() => document.getElementById('fit-route-btn').click(), 400);
+    }
+}
 
 // ── Map ────────────────────────────────────────────────────────
 function initMap() {
@@ -188,7 +221,7 @@ function closeModal(id) { document.getElementById(id).style.display = 'none'; }
 
 document.querySelectorAll('.modal-close').forEach(btn =>
     btn.addEventListener('click', () => closeModal(btn.dataset.modal)));
-document.querySelectorAll('.modal-overlay').forEach(overlay =>
+document.querySelectorAll('.modal-overlay:not([data-persistent])').forEach(overlay =>
     overlay.addEventListener('click', e => { if (e.target === overlay) closeModal(overlay.id); }));
 
 document.getElementById('btn-perf').addEventListener('click', () => openModal('modal-perf'));

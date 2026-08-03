@@ -18,7 +18,7 @@
     </div>
 
     <div id="route-bar">
-      <input type="text" id="route-input" placeholder="KSEE OCN KMYF" spellcheck="false" autocomplete="off">
+      <input type="text" id="route-input" placeholder="KSEE OCN KMYF" spellcheck="false" autocomplete="off" value="KSEE JLI TRM KPSP">
 
       <select id="alt-select" title="Cruise altitude">
         <optgroup label="VFR Eastbound (0°–179°)">
@@ -183,6 +183,32 @@
         </div>
       </div>
 
+    </div>
+  </div>
+
+  <!-- MODAL: Startup disclaimer (no close button — must be acknowledged) -->
+  <div class="modal-overlay" id="modal-disclaimer" data-persistent="true" style="display:none">
+    <div class="modal-box" id="disclaimer-box" role="alertdialog" aria-modal="true" aria-labelledby="disclaimer-title">
+      <div class="modal-header disclaimer-header">
+        <span id="disclaimer-title">⚠ SIMULATION USE ONLY</span>
+      </div>
+      <div class="modal-body">
+        <p class="disclaimer-lede">
+          This planner is a flight-simulation tool. It is <strong>NOT</strong> for real-world
+          flight planning, navigation, or dispatch.
+        </p>
+        <ul class="disclaimer-list">
+          <li>Not an FAA-approved source of aeronautical information.</li>
+          <li>Charts, airport data, weather, and winds aloft may be stale, incomplete, or wrong. NOTAMs are not provided.</li>
+          <li>Performance and weight &amp; balance figures are estimates and are not a substitute for the aircraft POH/AFM.</li>
+          <li>For an actual flight, use current FAA charts, an official weather briefing, and the approved aircraft documents.</li>
+        </ul>
+        <p class="disclaimer-note">
+          A sample flight — <strong>KSEE → JLI → TRM → KPSP</strong> — is loaded so you can see how
+          things work. Replace it in the route box with any route you want to plan.
+        </p>
+        <button class="btn-calc" id="disclaimer-ack">I Understand — Simulation Use Only</button>
+      </div>
     </div>
   </div>
 
