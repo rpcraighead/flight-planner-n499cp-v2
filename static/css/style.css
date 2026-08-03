@@ -506,6 +506,39 @@ a.toolbar-btn { text-decoration: none; display: inline-flex; align-items: center
 .modal-body { padding: 1rem; }
 .modal-flex { display: flex; gap: 1.5rem; flex-wrap: wrap; }
 
+/* ── STARTUP DISCLAIMER ───────────────────────────────────── */
+#modal-disclaimer { z-index: 1000; background: rgba(0,0,0,0.88); }
+#disclaimer-box { border-color: #ff4444; width: 540px; }
+.disclaimer-header {
+  background: rgba(191,10,48,0.18);
+  border-bottom-color: #ff4444;
+  color: #ff6b6b;
+  font-family: 'Orbitron', sans-serif;
+  letter-spacing: 0.06em;
+  justify-content: center;
+}
+.disclaimer-lede {
+  font-size: 0.88rem; line-height: 1.5; color: var(--text);
+  margin-bottom: 0.75rem;
+}
+.disclaimer-lede strong { color: #ff4444; }
+.disclaimer-list {
+  list-style: none;
+  font-size: 0.76rem; line-height: 1.5; color: var(--text-dim);
+}
+.disclaimer-list li { padding: 0.22rem 0 0.22rem 1rem; position: relative; }
+.disclaimer-list li::before {
+  content: '›'; position: absolute; left: 0; color: #ff4444;
+}
+.disclaimer-note {
+  margin-top: 0.85rem; padding: 0.6rem 0.7rem;
+  background: var(--bg3); border-left: 2px solid var(--gold);
+  border-radius: 4px;
+  font-size: 0.76rem; line-height: 1.5; color: var(--text);
+}
+.disclaimer-note strong { font-family: 'JetBrains Mono', monospace; color: var(--gold); }
+#disclaimer-ack { margin-top: 1rem; }
+
 .perf-half { flex: 1; min-width: 170px; }
 .perf-half h4 {
   color: var(--text-dim); font-size: 0.7rem;
