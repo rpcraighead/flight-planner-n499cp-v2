@@ -1,0 +1,77 @@
+{% extends "_auth_base.html" %}
+{% block title %}Activate{% endblock %}
+
+{% block content %}
+  <h1>Enter your product key</h1>
+  <p class="sub" style="margin:-0.7rem 0 1.3rem">
+    Signed in as <code>{{ email }}</code>. Your key must have been issued to this
+    address.
+  </p>
+
+  <label for="key">Product key</label>
+  <input type="text" id="key" class="key" placeholder="FP-XXXX-XXXX-XXXX-XXXX"
+         autocomplete="off" spellcheck="false" maxlength="23" required>
+  <button class="primary" id="btn-activate">Activate</button>
+
+  <div class="foot"><a id="link-signout">Sign in as someone else</a></div>
+{% endblock %}
+
+{% block script %}
+<script type="module">
+  await new Promise(r => window.fbReady ? r() : window.addEventListener('fb-ready', r));
+
+  const { onAuthStateChanged, signOut } =
+    await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js');
+
+  const auth = window.fbAuth;
+  const $ = id => document.getElementById(id);
+
+  // Redeeming a key sets a custom claim, and only a force-refreshed ID token
+  // carries it -- so we need the SDK's signed-in user, not just the cookie.
+  const user = await new Promise(resolve => {
+    const stop = onAuthStateChanged(auth, u => { stop(); resolve(u); });
+  });
+  if (!user) {
+    window.location.href = '/login';
+  }
+
+  // Format as the user types: FP-XXXX-XXXX-XXXX-XXXX
+  $('key').addEventListener('input', e => {
+    const raw = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^FP/, '');
+    const groups = raw.slice(0, 16).match(/.{1,4}/g) || [];
+    e.target.value = raw ? 'FP-' + groups.join('-') : '';
+  });
+
+  $('btn-activate').addEventListener('click', async () => {
+    window.clearMsg();
+    const btn = $('btn-activate');
+    btn.disabled = true;
+    try {
+      const res = await fetch('/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: $('key').value }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Activation failed.');
+
+      window.showMsg('Key accepted. Setting up your account…', 'ok');
+      await window.startSession(user, { force: true });
+      window.location.href = '/';
+    } catch (err) {
+      window.showMsg(err.message);
+      btn.disabled = false;
+    }
+  });
+
+  $('key').addEventListener('keydown', e => {
+    if (e.key === 'Enter') $('btn-activate').click();
+  });
+
+  $('link-signout').addEventListener('click', async () => {
+    await signOut(auth);
+    await fetch('/sessionLogout', { method: 'POST' });
+    window.location.href = '/login';
+  });
+</script>
+{% endblock %}

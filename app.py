@@ -1,4 +1,5 @@
 from flask import Flask, render_template, request, jsonify, send_from_directory, abort
+from werkzeug.middleware.proxy_fix import ProxyFix
 from datetime import datetime, timedelta, timezone
 import math
 import os
@@ -16,6 +17,15 @@ except Exception:
     _geomag = None  # headings fall back to true (mag_var = 0)
 
 app = Flask(__name__)
+# Cloud Run terminates TLS upstream; without this Flask builds http:// URLs and
+# the OAuth redirect_uri no longer matches what the provider has registered.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+# Auth is opt-in so local dev and the lab container still boot with no Identity
+# Platform project behind them. Production sets AUTH_ENABLED=1.
+if os.environ.get('AUTH_ENABLED') == '1':
+    import auth
+    auth.init_app(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = os.path.join(BASE_DIR, 'aviation_data.db')

@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Sign In{% endblock %} — N499CP Flight Planner</title>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --bg:#0e1116; --panel:#161b22; --border:#2a2f3a; --text:#d7dce3;
+      --dim:#8b939f; --accent:#4a86e8; --gold:#ffd700; --green:#28a745; --red:#bf0a30;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+      background:var(--bg); color:var(--text); padding:2rem 1.2rem;
+      font-family:'IBM Plex Sans',system-ui,sans-serif; line-height:1.6;
+    }
+    .card{
+      width:100%; max-width:410px; background:var(--panel);
+      border:1px solid var(--border); border-radius:10px; padding:2rem 1.8rem;
+    }
+    .brand{font-weight:700; font-size:1.15rem; letter-spacing:0.02em; margin-bottom:0.2rem}
+    .brand span{color:var(--accent)}
+    .sub{color:var(--dim); font-size:0.85rem; margin:0 0 1.6rem}
+    h1{font-size:1.05rem; margin:0 0 1.2rem}
+    label{display:block; font-size:0.78rem; color:var(--dim); margin:0 0 0.3rem;
+          text-transform:uppercase; letter-spacing:0.04em}
+    input{
+      width:100%; padding:0.6rem 0.75rem; margin-bottom:0.9rem; background:#0a0d12;
+      border:1px solid var(--border); border-radius:6px; color:var(--text);
+      font-family:inherit; font-size:0.92rem;
+    }
+    input:focus{outline:none; border-color:var(--accent)}
+    input.key{font-family:'JetBrains Mono',monospace; letter-spacing:0.08em; text-transform:uppercase}
+    button{
+      width:100%; padding:0.62rem 0.9rem; margin-bottom:0.6rem; border-radius:6px;
+      border:1px solid var(--border); background:#1b212b; color:var(--text);
+      font-family:inherit; font-size:0.9rem; font-weight:500; cursor:pointer;
+      display:flex; align-items:center; justify-content:center; gap:0.55rem;
+    }
+    button:hover:not(:disabled){border-color:var(--accent); color:#fff}
+    button:disabled{opacity:0.5; cursor:not-allowed}
+    button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+    button.primary:hover:not(:disabled){background:#3d76d4}
+    button svg{width:17px; height:17px; flex:none}
+    .divider{
+      display:flex; align-items:center; gap:0.8rem; margin:1.3rem 0;
+      color:var(--dim); font-size:0.75rem; text-transform:uppercase; letter-spacing:0.06em;
+    }
+    .divider::before,.divider::after{content:''; flex:1; height:1px; background:var(--border)}
+    .msg{
+      display:none; padding:0.6rem 0.8rem; border-radius:6px; margin-bottom:1rem;
+      font-size:0.85rem; border:1px solid;
+    }
+    .msg.err{display:block; background:#2a1114; border-color:var(--red); color:#f2b8bf}
+    .msg.ok{display:block; background:#11220f; border-color:var(--green); color:#b6e6b6}
+    .msg.info{display:block; background:#101c2b; border-color:var(--accent); color:#bcd6f7}
+    .foot{margin-top:1.3rem; font-size:0.8rem; color:var(--dim); text-align:center}
+    .foot a{color:var(--accent); cursor:pointer; text-decoration:none}
+    .foot a:hover{text-decoration:underline}
+    .qr{display:block; margin:0 auto 1rem; background:#fff; padding:0.7rem; border-radius:8px}
+    code{font-family:'JetBrains Mono',monospace; font-size:0.82em; background:#0a0d12;
+         padding:0.15em 0.45em; border-radius:4px; border:1px solid var(--border);
+         word-break:break-all}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">N499CP <span>Flight Planner</span></div>
+    <p class="sub">CAP San Diego Sr. Sq. 57</p>
+    <div class="msg" id="msg"></div>
+    {% block content %}{% endblock %}
+  </div>
+
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+    import { getAuth, setPersistence, browserSessionPersistence }
+      from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+
+    export const app = initializeApp({
+      apiKey: {{ api_key | tojson }},
+      authDomain: {{ auth_domain | tojson }},
+      projectId: {{ project_id | tojson }},
+    });
+    window.fbApp = app;
+    window.fbAuth = getAuth(app);
+    // The session cookie is the real session; the SDK only needs to hold an
+    // identity long enough to mint one, so keep nothing in local storage.
+    await setPersistence(window.fbAuth, browserSessionPersistence);
+    window.fbReady = true;
+    window.dispatchEvent(new Event('fb-ready'));
+  </script>
+
+  <script type="module">
+    await new Promise(r => window.fbReady ? r() : window.addEventListener('fb-ready', r));
+
+    const msgEl = document.getElementById('msg');
+    window.showMsg = (text, kind = 'err') => {
+      msgEl.className = 'msg ' + kind;
+      msgEl.textContent = text;
+    };
+    window.clearMsg = () => { msgEl.className = 'msg'; msgEl.textContent = ''; };
+
+    // Trade the current ID token for the HttpOnly session cookie.
+    window.startSession = async (user, { force = false } = {}) => {
+      const idToken = await user.getIdToken(force);
+      const res = await fetch('/sessionLogin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      if (!res.ok) throw new Error((await res.json()).error || 'sign-in failed');
+      return res.json();
+    };
+  </script>
+
+  {% block script %}{% endblock %}
+</body>
+</html>

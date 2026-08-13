@@ -1,0 +1,120 @@
+{% extends "_auth_base.html" %}
+{% block title %}Set Up Two-Factor{% endblock %}
+
+{% block content %}
+  <h1>Set up two-factor authentication</h1>
+  <p class="sub" style="margin:-0.7rem 0 1.3rem">
+    Password accounts require an authenticator app. Google and Microsoft sign-ins
+    are already covered by their own two-factor.
+  </p>
+
+  <div id="unverified" style="display:none">
+    <p style="font-size:0.9rem">
+      Confirm your email address first — two-factor can't be enabled until it's
+      verified.
+    </p>
+    <button class="primary" id="btn-resend">Resend verification email</button>
+  </div>
+
+  <div id="enroll" style="display:none">
+    <div id="qr-holder"><canvas class="qr" id="qr"></canvas></div>
+    <p style="font-size:0.85rem; color:var(--dim); margin:0 0 0.4rem">
+      Scan with Google Authenticator, 1Password, Authy, or similar. Can't scan?
+      Enter this key manually:
+    </p>
+    <p style="margin:0 0 1.2rem"><code id="secret"></code></p>
+
+    <label for="code">Code from your app</label>
+    <input type="text" id="code" class="key" inputmode="numeric"
+           autocomplete="one-time-code" maxlength="6" required>
+    <button class="primary" id="btn-enroll">Enable two-factor</button>
+  </div>
+
+  <div class="foot"><a id="link-signout">Sign out</a></div>
+{% endblock %}
+
+{% block script %}
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<script type="module">
+  await new Promise(r => window.fbReady ? r() : window.addEventListener('fb-ready', r));
+
+  const { onAuthStateChanged, multiFactor, TotpMultiFactorGenerator,
+          sendEmailVerification, signOut } =
+    await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js');
+
+  const auth = window.fbAuth;
+  const $ = id => document.getElementById(id);
+
+  const user = await new Promise(resolve => {
+    const stop = onAuthStateChanged(auth, u => { stop(); resolve(u); });
+  });
+  if (!user) window.location.href = '/login';
+
+  if (!user.emailVerified) {
+    $('unverified').style.display = 'block';
+    $('btn-resend').addEventListener('click', async () => {
+      await sendEmailVerification(user);
+      window.showMsg(`Verification email sent to ${user.email}.`, 'ok');
+    });
+  } else {
+    await beginEnrollment();
+  }
+
+  async function beginEnrollment() {
+    let secret;
+    try {
+      const session = await multiFactor(user).getSession();
+      secret = await TotpMultiFactorGenerator.generateSecret(session);
+    } catch (err) {
+      if (err.code === 'auth/requires-recent-login') {
+        window.showMsg('For security, sign in again before setting up two-factor.');
+        setTimeout(() => window.location.href = '/login', 2500);
+        return;
+      }
+      window.showMsg(err.message || 'Could not start enrollment.');
+      return;
+    }
+
+    $('enroll').style.display = 'block';
+    $('secret').textContent = secret.secretKey;
+
+    const uri = secret.generateQrCodeUrl(user.email, 'N499CP Flight Planner');
+    // Manual entry above is the fallback if the QR library fails to load.
+    if (window.QRCode) {
+      QRCode.toCanvas($('qr'), uri, { width: 190, margin: 1 },
+                      err => { if (err) $('qr-holder').style.display = 'none'; });
+    } else {
+      $('qr-holder').style.display = 'none';
+    }
+
+    $('btn-enroll').addEventListener('click', async () => {
+      window.clearMsg();
+      const btn = $('btn-enroll');
+      btn.disabled = true;
+      try {
+        const assertion = TotpMultiFactorGenerator.assertionForEnrollment(
+          secret, $('code').value.trim());
+        await multiFactor(user).enroll(assertion, 'Authenticator app');
+        // Re-mint the session cookie so it carries the second-factor claim.
+        const { licensed } = await window.startSession(user, { force: true });
+        window.location.href = licensed ? '/' : '/activate';
+      } catch (err) {
+        window.showMsg(err.code === 'auth/invalid-verification-code'
+          ? 'That code is not valid. Check the time on your device and try again.'
+          : err.message || 'Enrollment failed.');
+        btn.disabled = false;
+      }
+    });
+
+    $('code').addEventListener('keydown', e => {
+      if (e.key === 'Enter') $('btn-enroll').click();
+    });
+  }
+
+  $('link-signout').addEventListener('click', async () => {
+    await signOut(auth);
+    await fetch('/sessionLogout', { method: 'POST' });
+    window.location.href = '/login';
+  });
+</script>
+{% endblock %}
