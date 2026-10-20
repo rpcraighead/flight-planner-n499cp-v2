@@ -46,7 +46,7 @@ body {
 }
 #logo-img {
   width: 28px; height: 28px;
-  border-radius: 3px; object-fit: cover;
+  border-radius: 6px; object-fit: contain;
 }
 #logo-title {
   font-family: 'Orbitron', sans-serif;

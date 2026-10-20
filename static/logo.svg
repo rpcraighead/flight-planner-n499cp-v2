@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+<title id="title">CAP-VSAR / Bearing / dark / icon</title><desc id="desc">Run the whole search before anyone leaves the ground. Unofficial training tool. Not affiliated with or endorsed by Civil Air Patrol.</desc>
+<rect width="128" height="128" rx="24" fill="#111C28"/><g fill="none" stroke-linecap="round">
+          <circle cx="64" cy="64" r="48" stroke="#72D4DB" stroke-width="3.5"/>
+          <circle cx="64" cy="64" r="27" stroke="#9CB99F" stroke-width="2.5"/>
+          <path d="M30 100L98 28" stroke="#72D4DB" stroke-width="4.5"/>
+          <path d="M20 40L108 88" stroke="#9CB99F" stroke-width="4.5"/>
+          </g><circle cx="64" cy="64" r="10" fill="#111C28"/>
+          <circle cx="64" cy="64" r="7" fill="#FF8A42"/>
+</svg>
